@@ -1,0 +1,37 @@
+# Tested with Python 3.10, CUDA 11.8. Install PyTorch / DGL / PyG wheels matching your CUDA version first, e.g.
+#   pip install torch==2.4.0 --index-url https://download.pytorch.org/whl/cu118
+#   pip install dgl==2.4.0 -f https://data.dgl.ai/wheels/torch-2.4/cu118/repo.html
+#   pip install torch-scatter==2.1.2 torch-sparse==0.6.18 torch-cluster==1.6.3 -f https://data.pyg.org/whl/torch-2.4.0+cu118.html
+torch==2.4.0
+dgl==2.4.0
+torch-geometric==2.6.1
+torch-scatter==2.1.2
+torch-sparse==0.6.18
+torch-cluster==1.6.3
+
+# RL backbones / environments
+rl4co==0.6.0
+tensordict==0.10.0
+torchrl==0.10.0
+lightning==2.5.5
+pytorch-lightning==2.5.5
+
+# COExpander (MIS / OP)
+ml4co-kit==0.3.3
+
+# General
+numpy==2.2.6
+scipy==1.15.3
+scikit-learn==1.6.0
+networkx==2.8.8
+omegaconf==2.3.0
+einops==0.8.1
+pandas==2.3.3
+matplotlib==3.9.1
+seaborn==0.13.2
+tqdm==4.67.1
+wandb==0.22.0
+huggingface_hub
+
+# Optional: data generation / reference solvers
+# pyconcorde (https://github.com/jvkersch/pyconcorde), lkh, ortools, tsplib95==0.7.1, gurobipy==12.0.3
