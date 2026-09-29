@@ -1,0 +1,51 @@
+# --- Basic Info ---
+task: "MIS"
+sparse_factor: 1 # Must match training config
+
+# --- Data Path ---
+data:
+  # Path to the dataset you want to run inference on (e.g., validation or test set)
+  test_path: '../data/ml4co_mis/test_dataset/mis/mis_satlib_kamis-60s_425.954.txt'
+
+# --- Inference Parameters ---
+inference:
+  # Path to your final trained model checkpoint. This might be 'final_best_model.pth'
+  # or a specific checkpoint from your training directory.
+  ckpt_path: "../checkpoints/coexpander/mis_satlib.ckpt"
+
+  batch_size: 1 # You can adjust this based on your GPU memory
+  num_test_samples: 500
+
+  # **KEY SETTING**: Define the prefix size for inference.
+  # - [0]:  Solve from scratch (no prefix).
+  # - [0.1]: Use 10% of nodes as a prefix.
+  # - [0.5]: Use 50% of nodes as a prefix.
+  prefix_k_options: [0]
+
+# --- Training Parameters (Required for model init) ---
+train:
+  learning_rate: 0.0002 # This value must be present but is not used during inference
+
+# --- Model Architecture (MUST MATCH TRAINING CONFIG) ---
+encoder:
+  task: "MIS"
+  sparse: True
+  block_layers: [2, 4, 4, 2]
+  hidden_dim: 256
+  prefix_cond_dim: 128
+  prefix_enc_hidden_dim: 128
+  time_flag: True
+
+decoder:
+  decode_kwargs:
+    use_rlsa: False # Set to True to enable local search optimization after prediction
+
+model_params:
+  cm_alpha: 0.2
+  cm_beta: 0.025
+  prompt_prob: 0.2
+  delta_scale: [0.0, 1.0]
+  inference_steps: 1
+  determinate_steps: 10
+  beam_size: -1
+  energy_finetune: False

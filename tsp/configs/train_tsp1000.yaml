@@ -1,0 +1,47 @@
+data:
+  train_path: "./data/tspn1000_sol_train65000_s7991_solver_concorde.npz" # training set
+  valid_path: "./data/tspn1000_sol_valid3000_s7991_solver_concorde.npz" # validation set
+  test_path: "./data/tsp_solutions_test10000_n500_s7991_solver_concorde.npz"
+  prefix_sampling_strategy: 'continuous_from_start'
+
+model:
+  num_nodes: 1000 # <<< MODIFIED: Problem size
+  node_coord_dim: 2
+
+  # A value of 20-30 is typical.
+  sparse_factor: 100
+
+  pos_embed_num_feats: 64
+  node_embed_dim: 128
+
+  prefix_enc_hidden_dim: 256
+  prefix_cond_dim: 256
+
+  gnn_n_layers: 12
+  gnn_hidden_dim: 256
+  gnn_aggregation: "sum"
+  gnn_norm: "layer"
+  gnn_learn_norm: true
+  gnn_gated: true
+
+  time_embed_dim: 256
+
+diffusion:
+  num_timesteps: 1000
+  schedule_type: 'cosine'
+
+train:
+  batch_size: 8
+  num_epochs: 100
+  learning_rate: 0.0001
+  log_interval: 100
+  save_interval: 1
+  num_workers: 12
+  ckpt_dir: "./runs/prefix_difusco_tsp1000" # output directory for training checkpoints
+  early_stopping_patience: 100
+  early_stopping_min_delta: 0.00005
+
+eval:
+  batch_size: 8
+  num_inference_steps: 50
+  inference_schedule_type: 'cosine'

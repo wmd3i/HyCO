@@ -1,0 +1,31 @@
+# --- 1. RL (rl4co) model ---
+rl_model:
+  name: "AttentionModel"
+  problem: 'op'
+  # <<< IMPORTANT: path to the RL (rl4co) OP checkpoint
+  ckpt_path: "../checkpoints/rl_op/op100_epoch098"
+
+# --- 2. CO-Expander model ---
+co_expander_model:
+  # <<< IMPORTANT: path to the CO-Expander training config
+  config_path: "./train_config.yaml"
+  # <<< IMPORTANT: path to the CO-Expander .ckpt weights
+  ckpt_path: "../checkpoints/coexpander/op100.ckpt"
+
+# --- 3. Data and model parameters (must match CO-Expander training) ---
+data:
+  # <<< IMPORTANT: path to the OP test data
+  test_path: "../data/op/op100/test.txt"
+
+model_params:
+  num_nodes: 101       # total number of nodes (depot + customers)
+  node_coord_dim: 2
+  sparse_factor: 50    # k-NN sparsity (must match CO-Expander training)
+
+# --- 4. Hybrid solver ---
+solver:
+  entropy_threshold: 2    # entropy threshold for triggering CO-Expander (tunable)
+
+# --- 5. Evaluation ---
+eval:
+  batch_size: 1             # the hybrid solver processes one instance at a time

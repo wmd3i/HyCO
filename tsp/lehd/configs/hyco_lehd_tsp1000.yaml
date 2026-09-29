@@ -1,0 +1,77 @@
+data:
+  # Path to your TSP1000 test data
+  test_path:  "../data/tspn1000_sol_valid3000_s7991_solver_concorde.npz"
+
+model:
+  num_nodes: 1000
+  node_coord_dim: 2
+
+  # <<< NEW & CRUCIAL: Must match the setting used to tßrain the sparse DM >>>
+  # Number of nearest neighbors for the graph. A value of 50-100 is typical for TSP1000.
+  sparse_factor: 100
+
+  # --- DM model architecture (ensure these match your trained model) ---
+  pos_embed_num_feats: 64
+  node_embed_dim: 128
+  prefix_enc_hidden_dim: 256
+  prefix_cond_dim: 256
+  gnn_n_layers: 12
+  gnn_hidden_dim: 256
+  gnn_aggregation: "sum"
+  gnn_norm: "layer"
+  gnn_learn_norm: true
+  gnn_gated: true
+  time_embed_dim: 256
+
+# RL model configuration
+# RL model
+rl_model:
+  name: LEHD  # use the LEHD model
+  problem: 'tsp'
+  # Path to the LEHD checkpoint (e.g., result/20230509_153705_train/checkpoint-150.pt)
+  ckpt_path: "./checkpoints/checkpoint-150.pt"
+  # Additional LEHD parameters (must match those used in TSPModel.py)
+  lehd_params:
+    embedding_dim: 128
+    sqrt_embedding_dim: 11.3137 # 128 ** 0.5
+    decoder_layer_num: 6
+    qkv_dim: 16
+    head_num: 8
+    ff_hidden_dim: 512
+
+# Diffusion model configuration
+dm_model:
+  # <<< ACTION REQUIRED: Update this to your trained sparse TSP1000 DM checkpoint >>>
+  ckpt_path: "../checkpoints/prefix_difusco/tsp1000/stage4_k1_100_last_epoch_15.pth"
+
+diffusion:
+  num_timesteps: 1000
+  schedule_type: 'cosine'
+
+# Evaluation process configuration
+eval:
+  # Batch size must be 1 for this implementation due to memory and dynamic candidate generation
+  batch_size: 1
+  num_samples_to_evaluate: 64
+  inference_schedule_type: 'cosine'
+
+# Hybrid solver parameters
+solver:
+  use_theory_trigger: True
+  probe_interval: 20 # run the (expensive) KL probe every `probe_interval` steps
+
+  # --- Probing phase parameters ---
+  probe_rl_top_m: 10
+  dm_probe_timestep: 500 # A mid-range timestep
+  dm_prior_temp: 0.1
+
+  # --- Triggering thresholds (NEEDS TUNING for TSP1000) ---
+  # These are much higher than for TSP500 due to the larger action space.
+  entropy_threshold: 1
+  kl_div_threshold: 1.0
+
+  # --- DM proposal generation parameters ---
+  dm_inference_steps: 50
+  dynamic_n_cumulative_threshold: 0.2
+  max_dynamic_n: 0 # Add a cap to prevent excessive VRAM usage
+  apply_two_opt: False

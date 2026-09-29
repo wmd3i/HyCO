@@ -1,0 +1,17 @@
+# Config for OP-50 data generation (generate_op_dataset_rl.py) and the Gurobi reference solver (gurobi_op.py).
+# Run the scripts from mis_op/op_data/.
+
+rl_model:
+  name: "AttentionModel"
+  problem: 'op'
+  ckpt_path: "../checkpoints/rl_op/op50_epoch_098"   # pretrained rl4co AttentionModel for OP-50
+
+data:
+  test_path: "../data/op/op50/test.txt"   # used by gurobi_op.py
+
+model:
+  num_nodes: 51        # depot + 50 customers
+  sparse_factor: 30    # k-NN sparsity used when loading the dataset
+
+solver:
+  gurobi_time_limit: 300   # seconds per instance (Gurobi-300 in the paper; use 30 for Gurobi-30)

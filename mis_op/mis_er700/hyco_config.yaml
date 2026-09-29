@@ -1,0 +1,42 @@
+# --- 1. RL (LwD) model ---
+rl_model:
+  # <<< IMPORTANT: path to the LwD (PPO) MIS checkpoint
+  ckpt_path: "../checkpoints/lwd/best_model_er_02049"
+  # Hard-coded LwD architecture parameters (must match training)
+  n_layers: 4
+  hidden_dim: 128
+
+# --- 2. CO-Expander model ---
+co_expander_model:
+  # <<< IMPORTANT: path to the CO-Expander config file
+  # (the config of the model to load, i.e. infer_config.yaml in this folder)
+  config_path: "./infer_config.yaml"
+
+  # <<< IMPORTANT: path to the CO-Expander .ckpt weights
+  ckpt_path: "../checkpoints/coexpander/mis_er700.ckpt"
+
+# --- 3. Data and model parameters ---
+data:
+  # <<< IMPORTANT: path to the MIS test data (LwD/DGL format)
+  # Directory of test graphs
+  test_path: '../data/lwd/er_700_800/test'
+model_params:
+  num_nodes: 800 # example, adjust to your dataset.
+                 # Note: LwD datasets may have variable graph sizes
+
+# --- 4. Hybrid solver ---
+solver:
+  # --- Theory-driven trigger (as in the TSP setting) ---
+  use_theory_trigger: True
+  probe_rl_top_m: 5          # the M most likely choices of the RL agent
+
+  # --- Entropy trigger ---
+  entropy_threshold: 0.8     # [tunable] entropy threshold for triggering (top-M entropy)
+
+  # --- [Disabled] KL trigger ---
+  # KL trigger disabled for this dataset
+  use_kl_trigger: false
+
+# --- 5. Evaluation ---
+eval:
+  batch_size: 1             # the hybrid solver processes one instance at a time

@@ -1,0 +1,68 @@
+data:
+  # Path to your TSP1000 test data
+  test_path: "./data/tspn1000_sol_valid3000_s7991_solver_concorde.npz"
+
+model:
+  num_nodes: 1000
+  node_coord_dim: 2
+
+  # <<< NEW & CRUCIAL: Must match the setting used to train the sparse DM >>>
+  # Number of nearest neighbors for the graph. A value of 50-100 is typical for TSP1000.
+  sparse_factor: 100
+
+  # --- DM model architecture (ensure these match your trained model) ---
+  pos_embed_num_feats: 64
+  node_embed_dim: 128
+  prefix_enc_hidden_dim: 256
+  prefix_cond_dim: 256
+  gnn_n_layers: 12
+  gnn_hidden_dim: 256
+  gnn_aggregation: "sum"
+  gnn_norm: "layer"
+  gnn_learn_norm: true
+  gnn_gated: true
+  time_embed_dim: 256
+
+# RL model configuration
+rl_model:
+  name: POMO
+  problem: 'tsp'
+  # <<< ACTION REQUIRED: Update this to your TSP1000 POMO model checkpoint >>>
+  ckpt_path: "./checkpoints/rl/pomo500_epoch_100.ckpt" # RL checkpoint
+
+# Diffusion model configuration
+dm_model:
+  # <<< ACTION REQUIRED: Update this to your trained sparse TSP1000 DM checkpoint >>>
+  ckpt_path: "./checkpoints/prefix_difusco/tsp1000/stage4_k1_100_last_epoch_15.pth"
+
+diffusion:
+  num_timesteps: 1000
+  schedule_type: 'cosine'
+
+# Evaluation process configuration
+eval:
+  # Batch size must be 1 for this implementation due to memory and dynamic candidate generation
+  batch_size: 1
+  num_samples_to_evaluate: 24
+  inference_schedule_type: 'cosine'
+
+# Hybrid solver parameters
+solver:
+  use_theory_trigger: True
+  probe_interval: 1 # run the (expensive) KL probe every `probe_interval` steps
+
+  # --- Probing phase parameters ---
+  probe_rl_top_m: 10 #20
+  dm_probe_timestep: 500 # A mid-range timestep
+  dm_prior_temp: 0.1
+
+  # --- Triggering thresholds (NEEDS TUNING for TSP1000) ---
+  # These are much higher than for TSP500 due to the larger action space.
+  entropy_threshold: 1.8 #0.5
+  kl_div_threshold: 20.0
+
+  # --- DM proposal generation parameters ---
+  dm_inference_steps: 30
+  dynamic_n_cumulative_threshold: 0.8
+  max_dynamic_n: 30 # Add a cap to prevent excessive VRAM usage
+  apply_two_opt: False

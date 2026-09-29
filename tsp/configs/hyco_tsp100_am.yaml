@@ -1,0 +1,68 @@
+# Data and shared model parameters
+data:
+  # Raw test data; both RL and DM use the `locs` in this file
+  valid_path: "./data/tsp_solutions_valid1000_n100_s1997_solver_concorde.npz"
+  test_path: "./data/tsp_solutions_test_n100_s1997_solver_concorde.npz"  # test set with optimal tours
+
+# prefix_k: 1 # length of the RL-generated prefix
+
+model: # DM architecture parameters
+  num_nodes: 100
+  node_coord_dim: 2
+  pos_embed_num_feats: 64
+  node_embed_dim: 128
+  prefix_enc_hidden_dim: 256
+  prefix_cond_dim: 256
+  gnn_n_layers: 12
+  gnn_hidden_dim: 256
+  gnn_aggregation: "sum"
+  gnn_norm: "layer"
+  gnn_learn_norm: true
+  gnn_gated: true
+  time_embed_dim: 256
+
+# RL model
+rl_model:
+  name: "AttentionModel" # RL model class name in rl4co
+  problem: "tsp"
+  ckpt_path: "./checkpoints/rl/am_epoch_030.ckpt" # RL checkpoint
+
+# Diffusion model
+dm_model:
+  ckpt_path: "./checkpoints/prefix_difusco/tsp100/Stage5_1_20_best_model_checkpoint.pth"
+diffusion: # DM diffusion process parameters
+  num_timesteps: 1000
+  schedule_type: 'cosine'
+
+# Evaluation
+eval:
+  batch_size: 16 # must fit both the RL and the DM model in GPU memory
+  num_inference_steps: 20
+  inference_schedule_type: 'polynomial'
+  apply_two_opt: False
+  num_samples_to_visualize: 5 # number of instances for which comparison plots are generated
+  two_opt_max_iterations: 50
+
+solver:
+  # --- Whether to enable the theory-driven trigger ---
+  use_theory_trigger: true
+
+  # --- Probe parameters ---
+  # Number of RL top-M candidate actions to probe
+  probe_rl_top_m:  15 #10 best but time 174; 6 time 77
+  # Fixed noise level used by the DM probe (total steps T=1000)
+  dm_probe_timestep: 500
+  # Temperature of the DM prior distribution (controls the sharpness of the softmax)
+  dm_prior_temp: 0.1 #0.1
+# --- Additional parameters ---
+  # Cumulative probability threshold for adaptive candidate selection
+  # Recommended: 0.9 or 0.95
+  adaptive_m_p_thresh: 0.6
+  # --- Trigger thresholds ---
+  entropy_threshold: 1.6
+  kl_div_threshold: 5  # KL divergence threshold
+
+  # --- Other parameters ---
+  dm_inference_steps: 10
+  dynamic_n_cumulative_threshold: 0.8
+  apply_two_opt: False

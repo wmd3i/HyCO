@@ -1,0 +1,86 @@
+# Basic settings
+task: "OP"
+mode: "train"
+train_data_size: 280000 # adjust to the size of your dataset
+val_data_size: 500     # adjust to the size of your validation set
+test_data_sizee: 500
+sparse_factor: 50     # k-NN parameter (must be < number of nodes)
+store_data: False      # OP data can be large; False is recommended
+
+# Dataset paths
+data:
+  train_path: '../data/op/op200/train' # OP training data file or folder
+  val_path: '../data/op/op200/valid.txt'   # OP validation data file
+  test_path: '../data/op/op200/test.txt'    # OP test data file (optional)
+
+# Training parameters
+train:
+  batch_size: 64   # adjust to GPU memory
+  num_workers: 4
+  learning_rate: 0.0001
+  ckpt_dir: "./runs/op200_prefix_model" # checkpoint directory
+  resume_ckpt:  # optional: checkpoint to initialize from
+  devices: [0, 1]   # list of GPU IDs to use
+
+  # Curriculum stages
+  # Use concrete prefix lengths (integer k) instead of ratios
+  curriculum:
+    stage1:
+      name: "stage1_long_prefix"
+      epochs: 10
+      # e.g., train on longer prefixes (k from 0 to 50)
+      prefix_k_options: [
+        0,1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+        11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+        21, 22, 23, 24, 25, 26, 27, 28, 29, 30,40, 41,42,43,44,45,46,47,48,49,50
+
+      ]
+    stage2:
+      name: "stage2_medium_prefix"
+      epochs: 15
+      # e.g., train on medium-length prefixes
+      prefix_k_options: [
+        50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60,
+        61, 62, 63, 64,65,66,67,68,69,70,80, 90
+      ]
+    stage3:
+      name: "stage3_short_prefix_final"
+      epochs: 25
+      # e.g., train on prefixes of all lengths, emphasizing short prefixes
+      prefix_k_options: [
+        0,1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+        11, 12, 13, 14, 15, 16, 17, 18, 19, 20,21, 22, 23, 24, 25, 26, 27, 28, 29, 30]
+# Validation parameters
+val:
+  batch_size: 1 # validation batch size
+
+# Encoder config (must match the model architecture)
+encoder:
+  task: "OP"
+  sparse: True
+  block_layers: [2, 4, 4, 2] # GNN layers
+  hidden_dim: 256
+  prefix_cond_dim: 128         # matches the PrefixEncoder output
+  prefix_enc_hidden_dim: 256   # PrefixEncoder LSTM hidden size
+  max_length_cond_dim: 64      # matches the OPEmbedder output
+  time_flag: True             # enable the time embedding
+  aggregation: "sum"          # GNN aggregation
+  norm: "layer"               # GNN normalization
+  # learn_norm: True
+  # track_norm: False
+
+# Decoder config
+decoder:
+  decode_kwargs:
+    use_ls: False # whether to run local search after decoding
+
+# Core CM model parameters
+model_params:
+  cm_alpha: 0.2
+  cm_beta: 0.025
+  prompt_prob: 0.1         # probability of using a random mask (training)
+  delta_scale: [0.1, 0.5]  # range of the random mask ratio
+  inference_steps: 1    # CM inference steps (usually 1)
+  determinate_steps:  1   # number of determination steps at inference (1 = one-shot decoding)
+  beam_size: -1            # beam search size (not supported by the OP decoder)
+  energy_finetune: False   # whether to use energy-based finetuning

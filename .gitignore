@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Data, checkpoints and outputs (distributed separately, see README)
+data/
+checkpoints/
+runs/
+wandb/
+logs/
+*.npz
+*.pth
+*.pt
+*.ckpt
+*.log
+*.png
+*.pdf
+*.csv
+
+# Patched COExpander package created by mis_op/setup_coexpander.sh
+mis_op/co_expander/
+.DS_Store

@@ -1,0 +1,3535 @@
+diff --git a/co_expander/env/env.py b/co_expander/env/env.py
+index b6e7c86..c577dc3 100644
+--- a/co_expander/env/env.py
++++ b/co_expander/env/env.py
+@@ -4,11 +4,12 @@ import random
+ import numpy as np
+ from ml4co_kit import *
+ from torch import Tensor
+-from typing import List, Any, Tuple
+ from torch.utils.data import DataLoader, Dataset
+ from co_expander.env.denser import COExpanderDenser
+ from co_expander.env.sparser import COExpanderSparser
+-
++# --- OP-related imports ---
++from co_expander.env.sparse.op import parse_op_line # <-- new import # --- end of imports ---
++from typing import List, Any, Tuple, Dict # <-- added Dict
+ 
+ class COExpanderFakeDataset(Dataset):
+     def __init__(self, data_size: int):
+@@ -38,6 +39,8 @@ class COExpanderEnv(BaseEnv):
+         train_folder: str = None,
+         val_path: str = None,
+         store_data: bool = True,
++                # --- Config for prefix conditioning ---
++        prefix_k_options: List[float] = None,
+     ):
+         super().__init__(
+             name="COExpanderEnv",
+@@ -54,6 +57,8 @@ class COExpanderEnv(BaseEnv):
+         self.sparse = sparse_factor > 0
+         self.sparse_factor = sparse_factor
+         
++        self.prefix_k_options = prefix_k_options
++
+         # train data folder and val path
+         self.train_folder = train_folder
+         self.val_path = val_path
+@@ -66,12 +71,19 @@ class COExpanderEnv(BaseEnv):
+         self.mis_solver = MISSolver()
+         self.mvc_solver = MVCSolver()
+         self.tsp_solver = TSPSolver()
++        # --- Add placeholder for OP data loading ---
++        self.op_data = {"train": [], "val": []} # Store loaded raw OP data here
++        # --- End Add ---
+         
+         # dataset (Fake)
+         self.store_data = store_data
+         self.train_dataset = COExpanderFakeDataset(train_data_size)
+         self.val_dataset = COExpanderFakeDataset(val_data_size)
+-          
++        # *** FIX STARTS HERE ***
++        # Initialize val_data_cache to None to prevent AttributeError
++        self.val_data_cache = None
++        # *** FIX ENDS HERE ***
++        
+         # data_processor (sparser and denser)
+         if self.sparse:
+             self.data_processor = COExpanderSparser(self.sparse_factor, self.device)
+@@ -81,21 +93,120 @@ class COExpanderEnv(BaseEnv):
+         # load data
+         if self.mode is not None:
+             self.load_data()
++# original load_data
++    # def load_data(self):
++    #     if self.mode == "train":
++    #         # --- Change start ---
++    #         # Load all training files directly instead of only listing them
++    #         all_graph_data = []
++    #         train_files = [
++    #             os.path.join(self.train_folder, f) 
++    #             for f in os.listdir(self.train_folder) if f.endswith('.txt')
++    #         ]
++            
++    #         print(f"Found {len(train_files)} training files. Loading all of them...")
++            
++    #         for file_path in train_files:
++    #             print(f"Loading data from: {file_path}")
++    #             # Load the data of each file with self.mis_solver
++    #             self.mis_solver.from_txt(file_path, show_time=True, ref=True)
++    #             all_graph_data.extend(self.mis_solver.graph_data)
+ 
++    #         # Store all loaded data in a cache
++    #         self.train_data_cache = {
++    #             "graph_data": all_graph_data,
++    #             "data_size": len(all_graph_data)
++    #         }
++    #         # Keep these variables for compatibility
++    #         self.train_sub_files = train_files
++    #         self.train_sub_files_num = len(train_files)
++            
++    #         print(f"✅ Successfully loaded {self.train_data_cache['data_size']} instances from all files.")
++            
++    #         # Initialize the cache index
++    #         self.train_data_cache_idx = 0
++    #         # --- Change end ---
++    #                     # --- ADD THIS LINE ---
++    #         # Initialize the validation data cache to prevent the error
++    #         self.val_data_cache = None
++    #         # --- FIX ENDS HERE ---
++    #     else:
++    #         pass
++        
++# --- load_data modified to handle OP ---
+     def load_data(self):
+         if self.mode == "train":
+-            self.train_sub_files = [
+-                os.path.join(self.train_folder, train_files) \
+-                    for train_files in os.listdir(self.train_folder) 
+-            ]
+-            self.train_sub_files_num = len(self.train_sub_files)
+-            self.train_data_historty_cache = dict()
+-            self.train_data_cache = None
+-            self.val_data_cache = None
+-            self.train_data_cache_idx = 0
+-        else:
+-            pass
+-        
++            # --- OP training data loading ---
++            if self.task == "OP":
++                print(f"Loading OP training data from folder: {self.train_folder}")
++                self.op_data["train"] = []
++                train_files = [os.path.join(self.train_folder, f) for f in os.listdir(self.train_folder) if f.endswith('.txt')]
++                if not train_files:
++                     raise FileNotFoundError(f"No OP training files (.txt) found in {self.train_folder}")
++
++                for file_path in train_files:
++                     print(f"Parsing OP file: {file_path}")
++                     try:
++                         with open(file_path, 'r') as f:
++                             for line in f:
++                                 if line.strip():
++                                     coords, prizes, max_length, tour = parse_op_line(line)
++                                     # Store raw tuple
++                                     self.op_data["train"].append((coords, prizes, max_length, tour))
++                     except Exception as e:
++                         print(f"Error parsing file {file_path}: {e}")
++
++                if not self.op_data["train"]:
++                     raise ValueError("No valid OP training instances were loaded.")
++
++                random.shuffle(self.op_data["train"]) # Shuffle loaded instances
++                self.train_data_cache_idx = 0 # Reset index
++                print(f"✅ Successfully loaded {len(self.op_data['train'])} OP training instances.")
++                # No need for file list tracking for OP if loaded all at once
++
++            # --- File-list loading logic for other tasks (unchanged) ---
++            elif self.task in ["MIS", "MVC", "MCL", "MCut", "TSP", "ATSP", "CVRP"]:
++                 self.train_sub_files = [
++                     os.path.join(self.train_folder, f)
++                     for f in os.listdir(self.train_folder) if f.endswith('.txt')
++                 ]
++                 if not self.train_sub_files:
++                     raise FileNotFoundError(f"No training files (.txt) found in {self.train_folder} for task {self.task}")
++                 random.shuffle(self.train_sub_files)
++                 self.train_sub_files_num = len(self.train_sub_files)
++                 print(f"Found {self.train_sub_files_num} training files for task {self.task}.")
++                 self.current_train_file_idx = -1
++                 self.train_data_cache = None
++                 self.train_data_cache_idx = 0
++            else:
++                 print(f"Warning: Data loading not implemented for task '{self.task}' in training mode.")
++
++            self.val_data_cache = None # Reset val cache
++
++        # --- Validation/test data loading ---
++        elif self.mode in ["val", "test"] and self.val_path: # Assuming val_path is used for both
++             if self.task == "OP":
++                 print(f"Loading OP validation/test data from: {self.val_path}")
++                 self.op_data["val"] = [] # Use "val" key for simplicity
++                 try:
++                     with open(self.val_path, 'r') as f:
++                         for line in f:
++                             if line.strip():
++                                 coords, prizes, max_length, tour = parse_op_line(line)
++                                 self.op_data["val"].append((coords, prizes, max_length, tour))
++                     print(f"Loaded {len(self.op_data['val'])} OP validation/test instances.")
++                     self.val_data_cache = {"op_data": self.op_data["val"]} # Store in cache format
++                 except Exception as e:
++                     print(f"Error loading OP validation/test file {self.val_path}: {e}")
++                     self.val_data_cache = {"op_data": []}
++             else:
++                  # Load other tasks as before
++                  pass # Placeholder for existing val loading logic for other tasks
++
++    #--------------- End of modified load_data ---------------
++
++
++
+     def train_dataloader(self):
+         train_dataloader=DataLoader(
+             self.train_dataset, 
+@@ -127,11 +238,58 @@ class COExpanderEnv(BaseEnv):
+     #################################
+     #       Generate Val Data       #           
+     #################################
++# original generate_val_data
++    # def generate_val_data(self, val_idx: int) -> Any:
++    #     begin_idx = val_idx * self.val_batch_size
++    #     end_idx = begin_idx + self.val_batch_size
++    #     if self.task == "ATSP":
++    #         return self.generate_val_data_atsp(begin_idx, end_idx)
++    #     elif self.task == "CVRP":
++    #         return self.generate_val_data_cvrp(begin_idx, end_idx)
++    #     elif self.task == "MCl":
++    #         return self.generate_val_data_mcl(begin_idx, end_idx)
++    #     elif self.task == "MCut":
++    #         return self.generate_val_data_mcut(begin_idx, end_idx)
++    #     elif self.task == "MIS":
++    #         return self.generate_val_data_mis(begin_idx, end_idx)
++    #     elif self.task == "MVC":
++    #         return self.generate_val_data_mvc(begin_idx, end_idx)
++    #     elif self.task == "TSP":
++    #         return self.generate_val_data_tsp(begin_idx, end_idx) 
+ 
++
++# --- Modified generate_val_data ---
+     def generate_val_data(self, val_idx: int) -> Any:
+         begin_idx = val_idx * self.val_batch_size
+         end_idx = begin_idx + self.val_batch_size
+-        if self.task == "ATSP":
++
++        # --- OP validation data ---
++        if self.task == "OP":
++             if self.val_data_cache is None or "op_data" not in self.val_data_cache:
++                 print("Warning: OP validation data not loaded or cache is invalid. Trying to load...")
++                 self.load_data() # Try loading data again
++                 if self.val_data_cache is None or not self.val_data_cache.get("op_data"):
++                     print("Error: Failed to load OP validation data.")
++                     return None # Cannot proceed
++
++             op_val_data = self.val_data_cache["op_data"]
++             actual_val_size = len(op_val_data)
++
++             if begin_idx >= actual_val_size:
++                 return None # End of validation data
++
++             safe_end_idx = min(end_idx, actual_val_size)
++             batch_raw_data = op_val_data[begin_idx:safe_end_idx]
++
++             if not batch_raw_data: return None
++
++             # Pass prefix options (might be None or fixed for validation)
++             if isinstance(self.data_processor, COExpanderSparser):
++                  self.data_processor.prefix_k_options = self.prefix_k_options
++
++             return self.data_processor.op_batch_data_process(batch_raw_data)
++        
++        elif self.task == "ATSP":
+             return self.generate_val_data_atsp(begin_idx, end_idx)
+         elif self.task == "CVRP":
+             return self.generate_val_data_cvrp(begin_idx, end_idx)
+@@ -146,6 +304,8 @@ class COExpanderEnv(BaseEnv):
+         elif self.task == "TSP":
+             return self.generate_val_data_tsp(begin_idx, end_idx) 
+ 
++
++
+     def generate_val_data_atsp(self, begin_idx: int, end_idx: int) -> Any:
+         if self.val_data_cache is None:
+             self.atsp_solver.from_txt(self.val_path, ref=True)
+@@ -198,16 +358,61 @@ class COExpanderEnv(BaseEnv):
+             graph_data=self.val_data_cache["graph_data"][begin_idx:end_idx]
+         )
+     
++    # def generate_val_data_mis(self, begin_idx: int, end_idx: int) -> Any:
++    #     if self.val_data_cache is None:
++    #         self.mis_solver.from_txt(self.val_path, ref=True)
++    #         self.val_data_cache = {
++    #             "graph_data": self.mis_solver.graph_data
++    #         }
++    #     return self.data_processor.mis_batch_data_process(
++    #         graph_data=self.val_data_cache["graph_data"][begin_idx:end_idx]
++    #     )
++    
++# --- Modify generate_val_data_mis ---
+     def generate_val_data_mis(self, begin_idx: int, end_idx: int) -> Any:
+         if self.val_data_cache is None:
+-            self.mis_solver.from_txt(self.val_path, ref=True)
+-            self.val_data_cache = {
+-                "graph_data": self.mis_solver.graph_data
+-            }
++            try:
++                self.mis_solver.from_txt(self.val_path, ref=True)
++                self.val_data_cache = {
++                    "graph_data": self.mis_solver.graph_data if hasattr(self.mis_solver, 'graph_data') else []
++                }
++                if not self.val_data_cache["graph_data"]:
++                     print(f"Warning: No validation data loaded from {self.val_path}. Validation may yield no results.")
++                     # It's better to let it proceed and return None later if indices are invalid
++            except Exception as e:
++                 print(f"Error loading validation file {self.val_path}: {e}")
++                 self.val_data_cache = {"graph_data": []} # Ensure cache exists but is empty
++
++        # --- Add check for slice out of bounds ---
++        actual_val_data_size = len(self.val_data_cache["graph_data"]) if self.val_data_cache else 0
++
++        if begin_idx >= actual_val_data_size:
++            # If the start index is already beyond the available data, return None
++            # This signals to the validation loop that there's no more data.
++            print(f"Validation index {begin_idx} out of bounds (size={actual_val_data_size}). Ending validation epoch early.")
++            return None
++
++        # Adjust end_idx to not exceed the actual size
++        safe_end_idx = min(end_idx, actual_val_data_size)
++
++        # Retrieve the (potentially partial) batch data
++        graph_data_batch = self.val_data_cache["graph_data"][begin_idx:safe_end_idx]
++
++        # Although the check above should prevent this, double-check for safety
++        if not graph_data_batch:
++             print(f"Warning: Retrieved empty validation batch for indices {begin_idx}:{safe_end_idx} unexpectedly. Returning None.")
++             return None
++
++        # Ensure processor uses correct prefix options (might be None for validation)
++        if isinstance(self.data_processor, COExpanderSparser):
++            self.data_processor.prefix_k_options = self.prefix_k_options # Pass current stage options if needed for val
++
++        # Call the processor only if we have data
+         return self.data_processor.mis_batch_data_process(
+-            graph_data=self.val_data_cache["graph_data"][begin_idx:end_idx]
++            graph_data=graph_data_batch
+         )
+-    
++
++
+     def generate_val_data_mvc(self, begin_idx: int, end_idx: int) -> Any:
+         if self.val_data_cache is None:
+             self.mvc_solver.from_txt(self.val_path, ref=True)
+@@ -235,6 +440,10 @@ class COExpanderEnv(BaseEnv):
+     #################################
+     
+     def generate_train_data(self, batch_size: int) -> Any:
++        # --- Add OP Case ---
++        if self.task == "OP":
++            return self.generate_train_data_op(batch_size)
++
+         if self.task == "ATSP":
+             return self.generate_train_data_atsp(batch_size)
+         elif self.task == "CVRP":
+@@ -250,6 +459,37 @@ class COExpanderEnv(BaseEnv):
+         elif self.task == "TSP":
+             return self.generate_train_data_tsp(batch_size) 
+ 
++
++# --- Add generate_train_data_op ---
++# --- New: generate_train_data_op ---
++    def generate_train_data_op(self, batch_size: int) -> Any:
++        """Generates a batch of training data for OP from the loaded list."""
++        if not self.op_data["train"]:
++            print("Error: No OP training data loaded or available.")
++            return None
++
++        num_train_samples = len(self.op_data["train"])
++        begin_idx = self.train_data_cache_idx
++        end_idx = begin_idx + batch_size
++
++        if end_idx > num_train_samples:
++            print("\n--- End of epoch, reshuffling OP training data ---")
++            random.shuffle(self.op_data["train"])
++            self.train_data_cache_idx = 0
++            begin_idx = 0
++            end_idx = min(batch_size, num_train_samples)
++
++        batch_raw_data = self.op_data["train"][begin_idx:end_idx]
++        self.train_data_cache_idx = end_idx
++
++        if not batch_raw_data:
++             print(f"Warning: Trying to process an empty OP batch ({begin_idx}:{end_idx}).")
++             return None
++
++        # Sparser already has prefix_k_options set in generate_train_data dispatcher
++        return self.data_processor.op_batch_data_process(batch_raw_data)
++    # --- End of addition ---
++
+     def generate_train_data_atsp(self, batch_size: int)  -> Any:
+         # check data cache
+         begin_idx = self.train_data_cache_idx
+@@ -409,42 +649,93 @@ class COExpanderEnv(BaseEnv):
+         # sparse process
+         return self.data_processor.mcut_batch_data_process(graph_data)
+ 
++    # def generate_train_data_mis(self, batch_size: int) -> Any:
++    #     # --- Change start ---
++    #     # Simplified: take data directly from the loaded cache
++        
++    #     begin_idx = self.train_data_cache_idx
++    #     end_idx = begin_idx + batch_size
++
++    #     # At the end of an epoch, reset the index and reshuffle the data
++    #     if end_idx > self.train_data_cache["data_size"]:
++    #         # Reshuffle to keep every epoch random
++    #         print("\n--- End of epoch, reshuffling training data ---")
++    #         random.shuffle(self.train_data_cache["graph_data"])
++    #         self.train_data_cache_idx = 0
++    #         begin_idx = self.train_data_cache_idx
++    #         end_idx = begin_idx + batch_size
++
++    #     # Fetch a batch from the cache
++    #     graph_data = self.train_data_cache["graph_data"][begin_idx:end_idx]
++    #     self.train_data_cache_idx = end_idx
++        
++    #     # Data processing
++    #     return self.data_processor.mis_batch_data_process(graph_data)
++    #     # --- Change end ---
++
++# --- Dynamic (file-by-file) loading for MIS ---
+     def generate_train_data_mis(self, batch_size: int) -> Any:
+-        # check data cache
+-        begin_idx = self.train_data_cache_idx
+-        end_idx = begin_idx + batch_size
+-        if self.train_data_cache is None or end_idx > self.train_data_cache["data_size"]:
+-            # select one train file randomly
+-            sel_idx = np.random.randint(low=0, high=self.train_sub_files_num, size=(1,))[0]
+-            sel_train_sub_file_path = self.train_sub_files[sel_idx]
+-            
+-            # check if the data is in the cache when store_data is True
+-            if self.store_data and sel_train_sub_file_path in self.train_data_historty_cache.keys():
+-                # using data cache if the data is in the cache
+-                print(f"\nusing data cache ({sel_train_sub_file_path})")
+-                self.train_data_cache = self.train_data_historty_cache[sel_train_sub_file_path]
+-            else:
+-                # load data from the train file
+-                print(f"\nload mis train data from {sel_train_sub_file_path}")
+-                self.mis_solver.from_txt(sel_train_sub_file_path, show_time=True, ref=True)
++        # Check whether a new file needs to be loaded
++        load_new_file = False
++        if self.train_data_cache is None:
++            load_new_file = True
++        else:
++            # Check whether the currently cached file still has enough data
++            if self.train_data_cache_idx >= self.train_data_cache["data_size"]:
++                load_new_file = True
++
++        # If a new file needs to be loaded
++        if load_new_file:
++            # Rotate to the next file
++            self.current_train_file_idx = (self.current_train_file_idx + 1) % self.train_sub_files_num
++            # After a full pass over the files, optionally reshuffle the file list
++            if self.current_train_file_idx == 0 and self.train_sub_files_num > 1:
++                 print("\n--- Completed a cycle through training files, reshuffling file list ---")
++                 random.shuffle(self.train_sub_files)
++
++            sel_train_sub_file_path = self.train_sub_files[self.current_train_file_idx]
++
++            print(f"\nLoading MIS train data from: {sel_train_sub_file_path} ({self.current_train_file_idx + 1}/{self.train_sub_files_num})")
++            try:
++                # Load a single file with the MIS solver
++                self.mis_solver.from_txt(sel_train_sub_file_path, show_time=False, ref=True) # show_time is optional
++                if not self.mis_solver.graph_data:
++                    print(f"Warning: No data loaded from {sel_train_sub_file_path}. Skipping file.")
++                    # Recursive call to try loading the next file
++                    # Note: if all files are empty this could recurse forever; an exit condition is needed
++                    return self.generate_train_data_mis(batch_size)
++
++                loaded_graph_data = self.mis_solver.graph_data
++                random.shuffle(loaded_graph_data) # Shuffle the data inside the file
++
+                 self.train_data_cache = {
+-                    "graph_data": self.mis_solver.graph_data,
+-                    "data_size": len(self.mis_solver.graph_data)
++                    "graph_data": loaded_graph_data,
++                    "data_size": len(loaded_graph_data)
+                 }
+-                if self.store_data:
+-                    self.train_data_historty_cache[sel_train_sub_file_path] = self.train_data_cache
+-            
+-            # update cache and index
+-            self.train_data_cache_idx = 0
+-            begin_idx = self.train_data_cache_idx
+-            end_idx = begin_idx + batch_size
+-        
+-        # retrieve a portion of data from the cache
+-        graph_data = self.train_data_cache["graph_data"][begin_idx:end_idx]
+-        self.train_data_cache_idx = end_idx
+-        
+-        # data process
+-        return self.data_processor.mis_batch_data_process(graph_data)
++                self.train_data_cache_idx = 0 # Reset the data index of the current file
++                print(f"Loaded {self.train_data_cache['data_size']} instances.")
++
++            except Exception as e:
++                print(f"Error loading file {sel_train_sub_file_path}: {e}")
++                # Skip this file and try the next one
++                return self.generate_train_data_mis(batch_size)
++
++        # Fetch data from the currently cached file
++        begin_idx = self.train_data_cache_idx
++        end_idx = min(begin_idx + batch_size, self.train_data_cache["data_size"])
++        graph_data_batch = self.train_data_cache["graph_data"][begin_idx:end_idx]
++        self.train_data_cache_idx = end_idx # Update the index
++
++        # --- Important: make sure the Sparser uses the correct prefix_k_options ---
++        if isinstance(self.data_processor, COExpanderSparser):
++            self.data_processor.prefix_k_options = self.prefix_k_options
++
++        # Process and return the data batch
++        return self.data_processor.mis_batch_data_process(graph_data_batch)
++
++    # --- End of modified generate_train_data_mis ---
++
++
+ 
+     def generate_train_data_mvc(self, batch_size: int) -> Any:
+         # check data cache
+@@ -526,16 +817,33 @@ class COExpanderEnv(BaseEnv):
+     #          Random Mask          #
+     #################################
+ 
++    # def random_mask_sparse(
++    #     self, graph_list: List[Tensor], mask: Tensor, 
++    #     ground_truth: Tensor, nodes_num_list: list, 
++    #     edges_num_list: list, prompt_prob: float, delta_scale: tuple
++    # ):
++    #     if random.uniform(a=0, b=1) < prompt_prob:
++    #         delta = random.uniform(a=delta_scale[0], b=delta_scale[1])
++    #     else:
++    #         return mask
++# --- random_mask_sparse (OP added; OP uses an edge mask) ---
+     def random_mask_sparse(
+-        self, graph_list: List[Tensor], mask: Tensor, 
+-        ground_truth: Tensor, nodes_num_list: list, 
++        self, graph_list: List[Tensor], mask: Tensor,
++        ground_truth: Tensor, nodes_num_list: list,
+         edges_num_list: list, prompt_prob: float, delta_scale: tuple
+     ):
+         if random.uniform(a=0, b=1) < prompt_prob:
+             delta = random.uniform(a=delta_scale[0], b=delta_scale[1])
+         else:
+-            return mask
++            return mask # Return original mask if not prompting
+ 
++        # --- OP uses edge mask like TSP ---
++        if self.task == "TSP" or self.task == "OP":
++            # For edge tasks, mask is (E,), use tsp logic
++             return self.data_processor.tsp_batch_random_mask(
++                 mask=mask, edges_num_list=edges_num_list, delta=delta
++             )
++        
+         if self.task == "MCl":
+             return self.data_processor.mcl_batch_random_mask(
+                 graph_list=graph_list, mask=mask, ground_truth=ground_truth, 
+@@ -585,11 +893,32 @@ class COExpanderEnv(BaseEnv):
+     #          Update Mask          #
+     #################################
+     
++    # def update_mask_sparse(
++    #     self, heatmap: Tensor, x: Tensor, e: Tensor, graph_list: List[Tensor], 
++    #     mask: Tensor, nodes_num_list: list, edges_num_list: list, 
++    #     max_steps: int, continue_flag: bool, beam_size: int = -1
++    # ) -> Tuple[Tensor, Tensor]:
++
++# --- update_mask_sparse (OP added; OP uses edge updates) ---
+     def update_mask_sparse(
+-        self, heatmap: Tensor, x: Tensor, e: Tensor, graph_list: List[Tensor], 
+-        mask: Tensor, nodes_num_list: list, edges_num_list: list, 
+-        max_steps: int, continue_flag: bool, beam_size: int = -1
+-    ) -> Tuple[Tensor, Tensor]:
++        self, heatmap: Tensor, x: Tensor | None, e: Tensor | None, graph_list: List[Tensor],
++        mask: Tensor, nodes_num_list: list, edges_num_list: list,
++        max_steps: int, continue_flag: bool, beam_size: int = -1,
++        # --- New: OP may need extra information ---
++        edge_index: Tensor | None = None, # Edge indices might be needed for OP update
++        raw_data_list: list | None = None  # Raw data might contain max_length
++    ) -> Tuple[Tensor | None, Tensor]:
++
++        # --- OP uses edge update like TSP ---
++        if self.task == "TSP" or self.task == "OP":
++            # Pass e and mask (which are edge-based)
++            # OP might need a specific update logic different from TSP later
++            updated_e, updated_mask = self.data_processor.tsp_batch_update_mask(
++                 heatmap=heatmap, e=e, mask=mask, edges_num_list=edges_num_list,
++                 max_steps=max_steps, continue_flag=continue_flag
++            )
++            return updated_e, updated_mask # Return updated e and mask
++
+         if self.task == "MCl":
+             return self.data_processor.mcl_batch_update_mask(
+                 heatmap=heatmap, x=x, graph_list=graph_list, 
+diff --git a/co_expander/env/mask/mis.py b/co_expander/env/mask/mis.py
+index 07d5a0c..fd86df6 100644
+--- a/co_expander/env/mask/mis.py
++++ b/co_expander/env/mask/mis.py
+@@ -4,7 +4,7 @@ import numpy as np
+ from torch import Tensor
+ from typing import Sequence
+ from ml4co_kit import to_numpy, to_tensor
+-
++import scipy.sparse as sp  # <-- [Fix 1] import scipy.sparse
+ 
+ def mis_random_mask_sparse(
+     graph: Tensor, mask: Tensor, ground_truth: Tensor, delta: float
+@@ -26,7 +26,19 @@ def mis_update_mask_sparse(
+     # perpartion
+     device = heatmap.device
+     heatmap = to_numpy(heatmap)
+-    graph = to_numpy(graph)
++
++# [Fix 2] check whether 'graph' is a scipy sparse matrix
++    # (this is the format passed in manually by the hybrid solver)
++    if sp.issparse(graph):
++        graph = graph.toarray() # Convert to a dense numpy array
++    else:
++        # Keep the original logic for Tensor or ndarray inputs
++        graph = to_numpy(graph)
++# Extra check to make sure graph is not None
++    if graph is None:
++        raise ValueError("Graph object is None after conversion in mis_update_mask_sparse. Check to_numpy logic or input type.")
++    
++    #graph = to_numpy(graph)
+     mask = to_numpy(mask)
+     x: np.ndarray = to_numpy(x.bool())
+     sorted_nodes = np.argsort(-heatmap)
+diff --git a/co_expander/env/sparse/__init__.py b/co_expander/env/sparse/__init__.py
+index 0692928..3f559f7 100644
+--- a/co_expander/env/sparse/__init__.py
++++ b/co_expander/env/sparse/__init__.py
+@@ -2,4 +2,5 @@ from .mcl import mcl_sparse_process
+ from .mcut import mcut_sparse_process
+ from .mis import mis_sparse_process
+ from .mvc import mvc_sparse_process
+-from .tsp import tsp_sparse_process
+\ No newline at end of file
++from .tsp import tsp_sparse_process
++from .op import op_sparse_process # <-- new import
+\ No newline at end of file
+diff --git a/co_expander/env/sparse/mcl.py b/co_expander/env/sparse/mcl.py
+index 64556f9..cc291fd 100644
+--- a/co_expander/env/sparse/mcl.py
++++ b/co_expander/env/sparse/mcl.py
+@@ -1,42 +1,31 @@
++# co_expander/env/sparse/mcl.py
++
+ import torch
+ from ml4co_kit import to_tensor, MClGraphData
+ 
+ 
+ def mcl_sparse_process(mcl_graph: MClGraphData):
+-    # add or remove self loop (optional)
+-    # mcl_graph.remove_self_loop()
+-    # mcl_graph.add_self_loop()
+-    
+-    # data
+     nodes_num = mcl_graph.nodes_num
+     edge_index = to_tensor(mcl_graph.edge_index)
+     edges_num = edge_index.shape[-1]
+     x = torch.zeros(size=(nodes_num,))
+     edges_feature = torch.ones(size=(edges_num,))
+     
+-    # ground truth
+     if mcl_graph.ref_nodes_label is not None:
+         ground_truth = to_tensor(mcl_graph.ref_nodes_label)
+     else:
+         ground_truth = torch.zeros(size=(nodes_num,))
+     
+-    # adj matrix and mask
+     graph = to_tensor(mcl_graph.to_matrix()).long()
+     mask = torch.zeros(size=(nodes_num,))
+-    
+-    # raw_data
+     raw_data = mcl_graph
+     
++    # --- ADD DUMMY PREFIX INFO FOR CONSISTENCY ---
++    prefix_nodes = torch.tensor([], dtype=torch.long)
++    node_prefix_state = torch.zeros((nodes_num, 1), dtype=torch.float32)
++    
+     return (
+-        None, # nodes' feature, not used for MCl
+-        x.float(), # (V,): nodes' decision variable, whether to select a node or not
+-        edges_feature.float(), # (E,): edges' feature
+-        None, # (E,): edges' decision variable, not used for MCl
+-        edge_index.long(), # (2, E): index of edge endpoints
+-        graph, # (V, V): adjacency matrix
+-        mask.bool(), # (V,): mask
+-        ground_truth.long(), # (V,): ground truth
+-        nodes_num, # number of nodes
+-        edges_num, # number of edges
+-        raw_data, # original data
++        None, x.float(), edges_feature.float(), None, edge_index.long(),
++        graph, mask.bool(), ground_truth.long(), nodes_num, edges_num, raw_data,
++        prefix_nodes, node_prefix_state # <-- Return consistent tuple
+     )
+\ No newline at end of file
+diff --git a/co_expander/env/sparse/mcut.py b/co_expander/env/sparse/mcut.py
+index 28f5abe..fbb1c9a 100644
+--- a/co_expander/env/sparse/mcut.py
++++ b/co_expander/env/sparse/mcut.py
+@@ -1,42 +1,31 @@
++# co_expander/env/sparse/mcut.py
++
+ import torch
+ from ml4co_kit import to_tensor, MCutGraphData
+ 
+ 
+ def mcut_sparse_process(mcut_graph: MCutGraphData):
+-    # add or remove self loop (optional)
+-    # mcut_graph.remove_self_loop()
+-    # mcut_graph.add_self_loop()
+-    
+-    # data
+     nodes_num = mcut_graph.nodes_num
+     edge_index = to_tensor(mcut_graph.edge_index)
+     edges_num = edge_index.shape[-1]
+     x = torch.zeros(size=(nodes_num,))
+     edges_feature = torch.ones(size=(edges_num,))
+     
+-    # ground truth
+     if mcut_graph.ref_nodes_label is not None:
+         ground_truth = to_tensor(mcut_graph.ref_nodes_label)
+     else:
+         ground_truth = torch.zeros(size=(nodes_num,))
+     
+-    # adj matrix and mask
+     graph = to_tensor(mcut_graph.to_matrix()).long()
+     mask = torch.zeros(size=(nodes_num,))
+-    
+-    # raw_data
+     raw_data = mcut_graph
+     
++    # --- ADD DUMMY PREFIX INFO FOR CONSISTENCY ---
++    prefix_nodes = torch.tensor([], dtype=torch.long)
++    node_prefix_state = torch.zeros((nodes_num, 1), dtype=torch.float32)
++    
+     return (
+-        None, # nodes' feature, not used for MCut
+-        x.float(), # (V,): nodes' decision variable, 0 or 1 / set A or set B
+-        edges_feature.float(), # (E,): edges' feature
+-        None, # (E,): edges' decision variable, not used for MCut
+-        edge_index.long(), # (2, E): index of edge endpoints
+-        graph, # (V, V): adjacency matrix
+-        mask.bool(), # (V,): mask
+-        ground_truth.long(), # (V,): ground truth
+-        nodes_num, # number of nodes
+-        edges_num, # number of edges
+-        raw_data, # original data
++        None, x.float(), edges_feature.float(), None, edge_index.long(),
++        graph, mask.bool(), ground_truth.long(), nodes_num, edges_num, raw_data,
++        prefix_nodes, node_prefix_state # <-- Return consistent tuple
+     )
+\ No newline at end of file
+diff --git a/co_expander/env/sparse/mis.py b/co_expander/env/sparse/mis.py
+index fcd680d..78c3525 100644
+--- a/co_expander/env/sparse/mis.py
++++ b/co_expander/env/sparse/mis.py
+@@ -1,8 +1,9 @@
+ import torch
+ from ml4co_kit import to_tensor, MISGraphData
+ 
++import numpy as np # <-- Add this line
+ 
+-def mis_sparse_process(mis_graph: MISGraphData):
++def mis_sparse_process(mis_graph: MISGraphData, prefix_k_options: list = None):
+     # add or remove self loop (optional)
+     # mis_graph.remove_self_loop()
+     # mis_graph.add_self_loop()
+@@ -26,7 +27,21 @@ def mis_sparse_process(mis_graph: MISGraphData):
+     
+     # raw_data
+     raw_data = mis_graph
+-       
++
++    # --- New: generate prefix information ---
++    prefix_nodes = torch.tensor([], dtype=torch.long)
++    node_prefix_state = torch.zeros((nodes_num, 1), dtype=torch.float32)
++
++    if prefix_k_options is not None and len(prefix_k_options) > 0:
++        prefix_fraction = np.random.choice(prefix_k_options)
++        prefix_k = int(prefix_fraction * nodes_num)
++        
++        if prefix_k > 0:
++            perm = torch.randperm(nodes_num)
++            prefix_nodes = perm[:prefix_k]
++            node_prefix_state[prefix_nodes] = 1.0
++    # --- End of addition ---
++
+     return (
+         None, # nodes' feature, not used for MIS
+         x.float(), # (V,): nodes' decision variable, whether to select a node or not
+@@ -39,4 +54,6 @@ def mis_sparse_process(mis_graph: MISGraphData):
+         nodes_num, # number of nodes
+         edges_num, # number of edges
+         raw_data, # original data
++        prefix_nodes.long(),      # <-- new
++        node_prefix_state.float() # <-- new
+     )
+\ No newline at end of file
+diff --git a/co_expander/env/sparse/mvc.py b/co_expander/env/sparse/mvc.py
+index 80dde97..ebb442c 100644
+--- a/co_expander/env/sparse/mvc.py
++++ b/co_expander/env/sparse/mvc.py
+@@ -1,42 +1,31 @@
++# co_expander/env/sparse/mvc.py
++
+ import torch
+ from ml4co_kit import to_tensor, MVCGraphData
+ 
+ 
+ def mvc_sparse_process(mvc_graph: MVCGraphData):
+-    # add or remove self loop (optional)
+-    # mvc_graph.remove_self_loop()
+-    # mvc_graph.add_self_loop()
+-    
+-    # data
+     nodes_num = mvc_graph.nodes_num
+     edge_index = to_tensor(mvc_graph.edge_index)
+     edges_num = edge_index.shape[-1]
+     x = torch.zeros(size=(nodes_num,))
+     edges_feature = torch.ones(size=(edges_num,))
+     
+-    # ground truth
+     if mvc_graph.ref_nodes_label is not None:
+         ground_truth = to_tensor(mvc_graph.ref_nodes_label)
+     else:
+         ground_truth = torch.zeros(size=(nodes_num,))
+         
+-    # adj matrix and mask
+     graph = to_tensor(mvc_graph.to_matrix()).long()
+     mask = torch.zeros(size=(nodes_num,))
+-    
+-    # raw_data
+     raw_data = mvc_graph
+     
++    # --- ADD DUMMY PREFIX INFO FOR CONSISTENCY ---
++    prefix_nodes = torch.tensor([], dtype=torch.long)
++    node_prefix_state = torch.zeros((nodes_num, 1), dtype=torch.float32)
++    
+     return (
+-        None, # nodes' feature, not used for MVC
+-        x.float(), # (V,): nodes' decision variable, whether to select a node or not
+-        edges_feature.float(), # (E,): edges' feature
+-        None, # (E,): edges' decision variable, not used for MVC
+-        edge_index.long(), # (2, E): index of edge endpoints
+-        graph, # (V, V): adjacency matrix
+-        mask.bool(), # (V,): mask
+-        ground_truth.long(), # (V,): ground truth
+-        nodes_num, # number of nodes
+-        edges_num, # number of edges
+-        raw_data, # original data
++        None, x.float(), edges_feature.float(), None, edge_index.long(),
++        graph, mask.bool(), ground_truth.long(), nodes_num, edges_num, raw_data,
++        prefix_nodes, node_prefix_state # <-- Return consistent tuple
+     )
+\ No newline at end of file
+diff --git a/co_expander/env/sparse/op.py b/co_expander/env/sparse/op.py
+new file mode 100644
+index 0000000..0fa4f6c
+--- /dev/null
++++ b/co_expander/env/sparse/op.py
+@@ -0,0 +1,136 @@
++# co_expander_edit/env/sparse/op.py
++
++import torch
++import numpy as np
++from torch import Tensor
++from typing import Sequence, List, Dict, Tuple, Any
++from sklearn.neighbors import KDTree
++from ml4co_kit import check_dim, to_tensor
++import re
++
++# --- OP data parsing functions (adapted from data_loader_sparse.py) ---
++def parse_op_line(line: str) -> Tuple[np.ndarray, np.ndarray, float, List[int]]:
++    """Parses a single line of the OP text file."""
++    parts = line.strip().split(';')
++    data = {}
++    for part in parts:
++        if ':' in part:
++            key, value = part.split(':', 1)
++            data[key.strip()] = value.strip()
++
++    depot_coords = [float(x) for x in data['depots'].split()]
++    customer_coords_flat = [float(x) for x in data['points'].split()]
++    customer_coords = np.array(customer_coords_flat).reshape(-1, 2).tolist()
++    all_coords = np.array([depot_coords] + customer_coords, dtype=np.float32)
++    prizes = [0.0] + [float(x) for x in data['prizes'].split()]
++    prizes = np.array(prizes, dtype=np.float32)
++    max_length = float(data['max_length'])
++    tour = [int(x) for x in data['output'].split()]
++
++    return all_coords, prizes, max_length, tour
++
++# --- OP sparse processing function ---
++def op_sparse_process(
++    op_instance_data: Tuple[np.ndarray, np.ndarray, float, List[int]], # coords, prizes, max_length, tour
++    sparse_factor: int,
++    prefix_k_options: list = None # Accept prefix options
++) -> Sequence[Tensor | List | int | Any]:
++    """Processes a single OP instance for sparse GNN with prefix conditioning."""
++    coords, prizes, max_length, ref_tour = op_instance_data
++
++    nodes_num = coords.shape[0]
++    if nodes_num <= sparse_factor:
++        raise ValueError("sparse_factor must be smaller than nodes_num for k-NN graph.")
++
++    # 1. Build the k-NN graph (same as in data_loader_sparse.py)
++    kdt = KDTree(coords, metric='euclidean')
++    _, knn_indices = kdt.query(coords, k=sparse_factor)
++
++    source_nodes = torch.arange(nodes_num).view(-1, 1).repeat(1, sparse_factor).flatten()
++    target_nodes = torch.from_numpy(knn_indices).flatten()
++
++    edge_index = torch.stack([source_nodes, target_nodes], dim=0)
++    # Make undirected, remove self-loops and duplicates
++    edge_index = torch.cat([edge_index, edge_index.flip(0)], dim=1)
++    edge_index = edge_index[:, edge_index[0] != edge_index[1]]
++    edge_index_sorted, _ = torch.sort(edge_index, dim=0)
++    edge_index = torch.unique(edge_index_sorted, dim=1)
++    edges_num = edge_index.shape[1]
++
++    # 2. Edge features (normalized distances)
++    src, dst = edge_index[0], edge_index[1]
++    distances = torch.linalg.norm(to_tensor(coords)[src] - to_tensor(coords)[dst], dim=-1)
++    min_dist, max_dist = distances.min(), distances.max()
++    epsilon = 1e-8
++    normalized_distances = (distances - min_dist) / (max_dist - min_dist + epsilon)
++    edges_feature = normalized_distances.unsqueeze(-1).float() # (E, 1)
++
++    # 3. Node features (IsDepot, Prize, IsPrefix)
++    is_depot_feature = torch.zeros((nodes_num, 1), dtype=torch.float32)
++    is_depot_feature[0] = 1.0
++    prize_feature = to_tensor(prizes).unsqueeze(-1).float()
++    node_base_features = torch.cat([is_depot_feature, prize_feature], dim=-1) # (V, 2)
++
++    # 4. Generate prefix information
++    prefix_nodes = torch.tensor([], dtype=torch.long)
++    node_prefix_state = torch.zeros((nodes_num, 1), dtype=torch.float32) # (V, 1)
++# --- THIS IS THE FIX ---
++    # Convert ref_tour list to a torch tensor using torch.tensor
++    ref_tour_tensor = torch.tensor(ref_tour, dtype=torch.long)
++    # --- END FIX ---
++    
++    actual_tour_len = len(ref_tour) # Length of the reference solution
++
++    if prefix_k_options is not None and len(prefix_k_options) > 0:
++        # Filter k options to be valid for this tour length
++        # OP prefix is a segment of the *solution* tour, k < actual_tour_len
++        valid_k_options = [k for k in prefix_k_options if k < actual_tour_len]
++
++        if not valid_k_options:
++            prefix_k = 0 # Default to depot only if tour is too short
++        else:
++            prefix_k = int(np.random.choice(valid_k_options))
++
++        if prefix_k > 0:
++            # Simple strategy: take the first k nodes from the reference tour
++            prefix_nodes = ref_tour_tensor[:prefix_k]
++            node_prefix_state[prefix_nodes] = 1.0
++
++    # Assemble the final node features (including IsPrefix)
++    nodes_feature_final = torch.cat([node_base_features, node_prefix_state], dim=-1).float() # (V, 3)
++
++    # 5. Build the ground truth (which edges are in the reference solution)
++    ground_truth = torch.zeros(edges_num, dtype=torch.long)
++    tour_edges_set = set()
++    if actual_tour_len > 1:
++        for i in range(actual_tour_len - 1):
++            u, v = ref_tour[i], ref_tour[i+1]
++            tour_edges_set.add(tuple(sorted((u, v))))
++
++    for i in range(edges_num):
++        u, v = edge_index[0, i].item(), edge_index[1, i].item()
++        if tuple(sorted((u, v))) in tour_edges_set:
++            ground_truth[i] = 1
++
++    # 6. Other variables
++    e = torch.zeros(edges_num) # Edge decision variables (initialized to 0)
++    mask = torch.zeros(edges_num) # Edge mask (initialized to 0)
++    raw_data = (coords, prizes, max_length, ref_tour) # Store original data
++
++    # Return a tuple compatible with sparser.py (14 items, including max_length)
++    return (
++        nodes_feature_final, # [0] (V, 3): nodes' feature [IsDepot, Prize, IsPrefix]
++        None,               # [1] x: nodes' decision variable (None for OP)
++        edges_feature,      # [2] (E, 1): edges' feature [distance]
++        e.float(),          # [3] (E,): edges' decision variable (initially 0)
++        edge_index.long(),  # [4] (2, E): index of edge endpoints
++        None,               # [5] graph: adjacency matrix (None for sparse)
++        mask.bool(),        # [6] (E,): mask (initially False)
++        ground_truth.long(),# [7] (E,): ground truth edge labels
++        nodes_num,          # [8] int: number of nodes
++        edges_num,          # [9] int: number of edges in k-NN graph
++        raw_data,           # [10] original data tuple
++        prefix_nodes.long(),# [11] (k,): prefix node indices
++        node_prefix_state.float(), # [12] (V, 1): IsPrefix indicator
++        torch.tensor(max_length, dtype=torch.float32) # [13] Max Length constraint
++    )
+\ No newline at end of file
+diff --git a/co_expander/env/sparser.py b/co_expander/env/sparser.py
+index e7d57ff..f3d7349 100644
+--- a/co_expander/env/sparser.py
++++ b/co_expander/env/sparser.py
+@@ -1,7 +1,7 @@
+ import torch
+ import numpy as np
+ from torch import Tensor
+-from typing import List, Union, Any
++from typing import List, Union, Any, Tuple # <-- make sure Tuple is imported
+ from ml4co_kit import (
+     check_dim, MClGraphData, MCutGraphData, 
+     MISGraphData, MVCGraphData
+@@ -9,7 +9,7 @@ from ml4co_kit import (
+ from co_expander.env.processor import DataProcessor
+ from co_expander.env.sparse import (
+     mcl_sparse_process, mcut_sparse_process, 
+-    mis_sparse_process, mvc_sparse_process, tsp_sparse_process
++    mis_sparse_process, mvc_sparse_process, tsp_sparse_process,op_sparse_process # <-- import op_sparse_process
+ )
+ from co_expander.env.mask import (
+     mcl_random_mask_sparse, mcl_update_mask_sparse,
+@@ -19,12 +19,16 @@ from co_expander.env.mask import (
+     tsp_random_mask_sparse, tsp_update_mask_sparse,
+ )
+ 
++# --- New OP imports ---
++from co_expander.env.sparse.op import op_sparse_process, parse_op_line
++# --- End of addition ---
+ 
+ class COExpanderSparser(DataProcessor):
+-    def __init__(self, sparse_factor: int, device: str) -> None:
++    def __init__(self, sparse_factor: int, device: str, prefix_k_options: list = None) -> None:
+         super().__init__(device=device)
+         self.sparse_factor = sparse_factor
+-        
++        self.prefix_k_options = prefix_k_options # <-- new
++
+     #################################
+     #        Raw Data Process       #
+     #################################
+@@ -41,7 +45,11 @@ class COExpanderSparser(DataProcessor):
+         self.nodes_num_list = list()
+         self.edges_num_list = list()
+         self.raw_data_list = list()
+-        
++        self.prefix_nodes_list = list()      # <-- new
++        self.node_prefix_state_list = list() # <-- new
++# --- New OP fields ---
++        self.max_length_list = [] # <-- new
++        # --- End of addition ---
+     def update_lists(self, sparse_data: Any):
+         self.nodes_feature_list.append(sparse_data[0])
+         self.x_list.append(sparse_data[1])
+@@ -54,7 +62,13 @@ class COExpanderSparser(DataProcessor):
+         self.nodes_num_list.append(sparse_data[8])
+         self.edges_num_list.append(sparse_data[9])
+         self.raw_data_list.append(sparse_data[10])
+-    
++        self.prefix_nodes_list.append(sparse_data[11]) # <-- new
++        self.node_prefix_state_list.append(sparse_data[12]) # <-- new
++# --- New OP fields ---
++        if len(sparse_data) > 13: # Check if max_length is present (for OP)
++            self.max_length_list.append(sparse_data[13])
++        # --- End of addition ---
++
+     def merge_process(self, task: str, with_gt: bool) -> Any:
+         # [0] nodes' feature
+         if self.nodes_feature_list[0] is not None:
+@@ -98,71 +112,99 @@ class COExpanderSparser(DataProcessor):
+             ground_truth = torch.cat(self.ground_truth_list, 0).to(self.device) # (E,) or (V,)
+         else:
+             ground_truth = None
+-        
++
++        # --- New: merge prefix information ---
++        prefix_nodes = self.prefix_nodes_list 
++        node_prefix_state = torch.cat(self.node_prefix_state_list, 0).to(self.device)
++        # --- End of addition ---
++# --- New OP fields ---
++# --- Merge max_lengths ---
++        max_lengths = None
++        if task == "OP" and self.max_length_list:
++             # Ensure they are tensors before stacking
++             tensor_max_lengths = [l if isinstance(l, Tensor) else torch.tensor(l) for l in self.max_length_list]
++             if tensor_max_lengths:
++                 max_lengths = torch.stack(tensor_max_lengths).to(self.device)
++
++        # Return a 15-item tuple (max_lengths last)
++
++        # --- End of addition ---
++
+         # return processed dense data (12 items)
+         return (
+             task, nodes_feature, x, edges_feature, e, edge_index, self.graph_list, 
+-            mask, ground_truth, self.nodes_num_list, self.edges_num_list, self.raw_data_list
++            mask, ground_truth, self.nodes_num_list, self.edges_num_list, self.raw_data_list,
++            prefix_nodes, node_prefix_state, max_lengths #
+         )
+ 
+-    def mcl_batch_data_process(
+-        self, graph_data: List[MClGraphData], sampling_num: int = 1
+-    ) -> Any:
+-        # initialize lists
++
++# --- New: op_batch_data_process ---
++    def op_batch_data_process(self, op_data_list: List[tuple], sampling_num: int = 1) -> Any:
++        self.initial_lists()
++        for op_instance_data in op_data_list:
++             try:
++                 # Call op_sparse_process
++                 sparse_data = op_sparse_process(
++                     op_instance_data=op_instance_data,
++                     sparse_factor=self.sparse_factor,
++                     prefix_k_options=self.prefix_k_options
++                 )
++                 for _ in range(sampling_num):
++                     self.update_lists(sparse_data)
++             except ValueError as e:
++                  print(f"Skipping instance due to error in op_sparse_process: {e}")
++                  # Optionally log the problematic instance details
++                  continue # Skip this instance
++
++        # Check if any data was successfully processed
++        if not self.nodes_num_list:
++             print("Warning: No OP instances were successfully processed in this batch.")
++             # Return None or an empty structure, depending on how the caller handles it
++             # Returning None might be safer if the training loop checks for it
++             return None
++
++        return self.merge_process("OP", with_gt=True) # Assume ground truth is always available
++    # --- End of addition ---
++
++
++    # --- THIS IS THE MOST IMPORTANT PART ---
++    # Make sure every `..._batch_data_process` method for NODE-BASED problems calls
++    # its corresponding `..._sparse_process` function, which now returns the 13-item tuple.
++    
++
++
++
++
++    def mcl_batch_data_process(self, graph_data: List[MClGraphData], sampling_num: int = 1) -> Any:
+         self.initial_lists()
+-        
+-        # sparse process
+         for graph in graph_data:
+-            sparse_data = mcl_sparse_process(graph)
++            sparse_data = mcl_sparse_process(graph) # This now returns 13 items
+             for _ in range(sampling_num):
+                 self.update_lists(sparse_data)
+-
+-        # merge
+         return self.merge_process("MCl", with_gt=True)
+-    
+-    def mcut_batch_data_process(
+-        self, graph_data: List[MCutGraphData], sampling_num: int = 1
+-    ) -> Any:
+-        # initialize lists
++
++    def mcut_batch_data_process(self, graph_data: List[MCutGraphData], sampling_num: int = 1) -> Any:
+         self.initial_lists()
+-        
+-        # sparse process
+         for graph in graph_data:
+-            sparse_data = mcut_sparse_process(graph)
++            sparse_data = mcut_sparse_process(graph) # This now returns 13 items
+             for _ in range(sampling_num):
+                 self.update_lists(sparse_data)
+-
+-        # merge
+         return self.merge_process("MCut", with_gt=True)
+ 
+-    def mis_batch_data_process(
+-        self, graph_data: List[MISGraphData], sampling_num: int = 1
+-    ) -> Any:
+-        # initialize lists
++    def mis_batch_data_process(self, graph_data: List[MISGraphData], sampling_num: int = 1) -> Any:
+         self.initial_lists()
+-        
+-        # sparse process
+         for graph in graph_data:
+-            sparse_data = mis_sparse_process(graph)
++            sparse_data = mis_sparse_process(graph, self.prefix_k_options) # This returns 13 items
+             for _ in range(sampling_num):
+                 self.update_lists(sparse_data)
+-
+-        # merge
+         return self.merge_process("MIS", with_gt=True)
+ 
+-    def mvc_batch_data_process(
+-        self, graph_data: List[MVCGraphData], sampling_num: int = 1
+-    ) -> Any:
+-        # initialize lists
++    def mvc_batch_data_process(self, graph_data: List[MVCGraphData], sampling_num: int = 1) -> Any:
+         self.initial_lists()
+-        
+-        # sparse process
+         for graph in graph_data:
+-            sparse_data = mvc_sparse_process(graph)
++            sparse_data = mvc_sparse_process(graph) # This now returns 13 items
+             for _ in range(sampling_num):
+                 self.update_lists(sparse_data)
+-
+-        # merge
+         return self.merge_process("MVC", with_gt=True)
+     
+     def tsp_batch_data_process(
+diff --git a/co_expander/model/cm_model.py b/co_expander/model/cm_model.py
+index fe5ac27..7119221 100644
+--- a/co_expander/model/cm_model.py
++++ b/co_expander/model/cm_model.py
+@@ -8,8 +8,17 @@ from co_expander.model.encoder.gnn_encoder import GNNEncoder
+ from co_expander.model.decoder.decoder import COExpanderDecoder
+ from co_expander.model.consistency.inference import InferenceSchedule
+ from co_expander.model.consistency.diffusion import CategoricalDiffusion
+-
+-
++from typing import Union, Tuple, List, Dict # <-- new import: Dict
++import numpy as np # <-- new import: numpy
++# --- Helper function to build edge map ---
++def _get_edge_map(edge_index: Tensor) -> Dict[Tuple[int, int], int]:
++    """Creates a map from a canonical edge tuple (min_node, max_node) to its index."""
++    edge_map = {}
++    for i, edge in enumerate(edge_index.t().cpu().numpy()):
++        u, v = edge
++        key = tuple(sorted((u.item(), v.item())))
++        edge_map[key] = i
++    return edge_map
+ class COExpanderCMModel(COExpanderModel):
+     def __init__(
+         self,
+@@ -48,121 +57,240 @@ class COExpanderCMModel(COExpanderModel):
+         self.cm_beta = cm_beta
+         self.inference_steps = inference_steps
+         self.time_schedule = InferenceSchedule("cosine", 1000, inference_steps)
+-        
++
++# --- Modified train_edge_sparse_process ---
+     def train_edge_sparse_process(
+-        self, task: str, nodes_feature: Tensor, x: Tensor, edges_feature: Tensor, e: Tensor, 
+-        edge_index: Tensor, graph_list: List[Tensor], mask: Tensor, ground_truth: Tensor, 
+-        nodes_num_list: list, edges_num_list: list, raw_data_list: list
++        self, task: str, nodes_feature: Tensor | None, x: Tensor | None,
++        edges_feature: Tensor | None, e: Tensor | None, edge_index: Tensor,
++        graph_list: List[Tensor], mask: Tensor, ground_truth: Tensor,
++        nodes_num_list: list, edges_num_list: list, raw_data_list: list,
++        prefix_nodes: List[Tensor], node_prefix_state: Tensor | None, # node_prefix_state may be None
++        max_lengths: Tensor | None # New: max_lengths
+     ) -> Tensor:
+         # consistency time
+         t1: Tensor = torch.randint(1, 1001, size=(1,), device=self.device)
+         t2 = (self.cm_alpha * t1).int()
+-        
++
+         # diffusion (add noise based on ground truth)
+         e_noised_t1, e_noised_t2 = self.diffusion.consistency_sample_sparse(
+-            x=ground_truth, t1=t1, t2=t2
++            x=ground_truth, t1=t1, t2=t2 # Add noise to ground_truth
+         )
+ 
+-        # add small random noise
+-        e_small_noise_t1 = 1.0 + self.cm_beta * torch.rand_like(e_noised_t1)
+-        e_small_noise_t2 = 1.0 + self.cm_beta * torch.rand_like(e_noised_t2)
+-        e_noised_t1 = e_noised_t1 * e_small_noise_t1
+-        e_noised_t2 = e_noised_t2 * e_small_noise_t2
+-        
+-        # random mask
++        # --- New: prefix edge clamping ---
++        # 1. Build the mapping from edge index to graph index
++        node_cumsum = torch.cat([torch.tensor([0], device=edge_index.device),
++                                 torch.cumsum(torch.tensor(nodes_num_list, device=edge_index.device), dim=0)[:-1]])
++        edge_batch_vector = torch.repeat_interleave(torch.arange(len(nodes_num_list), device=edge_index.device),
++                                                    torch.tensor(edges_num_list, device=edge_index.device))
++
++        # 2. Identify edges that lie inside the prefix
++        is_prefix_edge_mask = torch.zeros_like(ground_truth, dtype=torch.bool)
++        edge_map = _get_edge_map(edge_index) # Helper function defined above
++
++        for b_idx in range(len(nodes_num_list)):
++            prefix_k = len(prefix_nodes[b_idx])
++            if prefix_k > 1: # Only internal edges if prefix has > 1 node
++                p_nodes_local = prefix_nodes[b_idx].to(node_cumsum.device) # Move to GPU
++                p_nodes_global = p_nodes_local + node_cumsum[b_idx]
++                # OP prefix is a path, check consecutive nodes
++                for j in range(prefix_k - 1):
++                    u_global, v_global = p_nodes_global[j].item(), p_nodes_global[j+1].item()
++                    edge_key = tuple(sorted((u_global, v_global)))
++                    if edge_key in edge_map:
++                        edge_idx = edge_map[edge_key]
++                        # Make sure this edge belongs to the current graph b_idx (redundant but safe)
++                        if edge_batch_vector[edge_idx] == b_idx:
++                            is_prefix_edge_mask[edge_idx] = True
++
++        # 3. Clamp the noise: prefix edges are not noised and stay equal to ground_truth (usually 1)
++        e_noised_t1 = torch.where(is_prefix_edge_mask, ground_truth.float(), e_noised_t1.float())
++        e_noised_t2 = torch.where(is_prefix_edge_mask, ground_truth.float(), e_noised_t2.float())
++        # --- End of clamping ---
++
++
++        # add small random noise (only on non-prefix edges)
++        small_noise = 1.0 + self.cm_beta * torch.rand_like(e_noised_t1)
++        e_noised_t1 = torch.where(is_prefix_edge_mask, e_noised_t1, e_noised_t1 * small_noise)
++        e_noised_t2 = torch.where(is_prefix_edge_mask, e_noised_t2, e_noised_t2 * small_noise)
++
++
++        # random mask (unchanged, but its effect is overridden by mask_clamped below)
+         random_mask = self.env.random_mask_sparse(
+-            graph_list=graph_list, mask=mask, ground_truth=ground_truth, 
+-            nodes_num_list=nodes_num_list, edges_num_list=edges_num_list, 
++            graph_list=graph_list, mask=mask, ground_truth=ground_truth,
++            nodes_num_list=nodes_num_list, edges_num_list=edges_num_list,
+             prompt_prob=self.prompt_prob, delta_scale=self.delta_scale
+         )
+ 
+-        # update label with mask
+-        e_noised_t1_mask = torch.where(random_mask, ground_truth-0.5, e_noised_t1-0.5)
+-        e_noised_t2_mask = torch.where(random_mask, ground_truth-0.5, e_noised_t2-0.5)
++        # --- New: combine random_mask and is_prefix_edge_mask ---
++        # The final mask must include prefix edges (they are known)
++        mask_clamped = random_mask | is_prefix_edge_mask
++
++        # update label with mask_clamped
++        # The input e is in [-0.5, 0.5] or [-1, 1] depending on the model implementation
++        # Assume the model expects [-0.5, 0.5]; convert from {0, 1}
++        e_target_for_mask = ground_truth.float() - 0.5 # [-0.5, 0.5]
++        e_noised_t1_mask = torch.where(mask_clamped, e_target_for_mask, e_noised_t1 - 0.5)
++        e_noised_t2_mask = torch.where(mask_clamped, e_target_for_mask, e_noised_t2 - 0.5)
+ 
+         # forward
+-        x_pred_t1, e_pred_t1 = self.model.forward(
+-            task=task, focus_on_node=False, focus_on_edge=True, 
+-            nodes_feature=nodes_feature, x=x, edges_feature=edges_feature, 
+-            e=e_noised_t1_mask, mask=random_mask, t=t1, edge_index=edge_index
++        # --- Changed: pass max_lengths ---
++        _, e_pred_t1 = self.model.forward(
++            task=task, focus_on_node=False, focus_on_edge=True,
++            nodes_feature=nodes_feature, x=x, edges_feature=edges_feature,
++            e=e_noised_t1_mask, mask=mask_clamped, t=t1, edge_index=edge_index,
++            node_prefix_state=node_prefix_state, prefix_nodes=prefix_nodes, nodes_num_list=nodes_num_list,
++            max_lengths=max_lengths # <-- pass max_lengths
+         )
+-        x_pred_t2, e_pred_t2 = self.model.forward(
+-            task=task, focus_on_node=False, focus_on_edge=True, 
+-            nodes_feature=nodes_feature, x=x, edges_feature=edges_feature, 
+-            e=e_noised_t2_mask, mask=random_mask, t=t2, edge_index=edge_index
++        _, e_pred_t2 = self.model.forward(
++            task=task, focus_on_node=False, focus_on_edge=True,
++            nodes_feature=nodes_feature, x=x, edges_feature=edges_feature,
++            e=e_noised_t2_mask, mask=mask_clamped, t=t2, edge_index=edge_index,
++            node_prefix_state=node_prefix_state, prefix_nodes=prefix_nodes, nodes_num_list=nodes_num_list,
++            max_lengths=max_lengths # <-- pass max_lengths
+         )
+-        del x_pred_t1
+-        del x_pred_t2
+ 
+         # loss
++        # --- New: loss masking ---
++        loss_mask = ~is_prefix_edge_mask # Only compute the loss on non-prefix edges
++
+         if self.energy_finetune:
+-            loss_t1 = self.env.finetune_sparse(e_pred_t1, edges_feature, edge_index)
+-            loss_t2 = self.env.finetune_sparse(e_pred_t2, edges_feature, edge_index)
++            # The finetuning loss needs to respect the mask
++             loss_t1 = self.env.finetune_sparse(e_pred_t1[loss_mask], edges_feature[loss_mask] if edges_feature is not None else None, edge_index[:, loss_mask]) if loss_mask.any() else torch.tensor(0.0, device=self.device)
++             loss_t2 = self.env.finetune_sparse(e_pred_t2[loss_mask], edges_feature[loss_mask] if edges_feature is not None else None, edge_index[:, loss_mask]) if loss_mask.any() else torch.tensor(0.0, device=self.device)
++
+         else:
+             loss_func = nn.CrossEntropyLoss()
+-            loss_t1 = loss_func(e_pred_t1, ground_truth)
+-            loss_t2 = loss_func(e_pred_t2, ground_truth)
++            # Make sure target and prediction shapes match and are non-empty
++            target = ground_truth[loss_mask]
++            pred1 = e_pred_t1[loss_mask]
++            pred2 = e_pred_t2[loss_mask]
++
++            if target.numel() > 0: # Only compute the loss when there are edges to compute it on
++                loss_t1 = loss_func(pred1, target)
++                loss_t2 = loss_func(pred2, target)
++            else: # Guard for the (unlikely) case that all edges are inside the prefix
++                loss_t1 = torch.tensor(0.0, device=self.device)
++                loss_t2 = torch.tensor(0.0, device=self.device)
++
+         loss = loss_t1 + loss_t2
+         return loss
++
++        # Original train_edge
++    # def train_edge_sparse_process(
++    #     self, task: str, nodes_feature: Tensor, x: Tensor, edges_feature: Tensor, e: Tensor, 
++    #     edge_index: Tensor, graph_list: List[Tensor], mask: Tensor, ground_truth: Tensor, 
++    #     nodes_num_list: list, edges_num_list: list, raw_data_list: list
++    # ) -> Tensor:
++    #     # consistency time
++    #     t1: Tensor = torch.randint(1, 1001, size=(1,), device=self.device)
++    #     t2 = (self.cm_alpha * t1).int()
++        
++    #     # diffusion (add noise based on ground truth)
++    #     e_noised_t1, e_noised_t2 = self.diffusion.consistency_sample_sparse(
++    #         x=ground_truth, t1=t1, t2=t2
++    #     )
++
++    #     # add small random noise
++    #     e_small_noise_t1 = 1.0 + self.cm_beta * torch.rand_like(e_noised_t1)
++    #     e_small_noise_t2 = 1.0 + self.cm_beta * torch.rand_like(e_noised_t2)
++    #     e_noised_t1 = e_noised_t1 * e_small_noise_t1
++    #     e_noised_t2 = e_noised_t2 * e_small_noise_t2
++        
++    #     # random mask
++    #     random_mask = self.env.random_mask_sparse(
++    #         graph_list=graph_list, mask=mask, ground_truth=ground_truth, 
++    #         nodes_num_list=nodes_num_list, edges_num_list=edges_num_list, 
++    #         prompt_prob=self.prompt_prob, delta_scale=self.delta_scale
++    #     )
++
++    #     # update label with mask
++    #     e_noised_t1_mask = torch.where(random_mask, ground_truth-0.5, e_noised_t1-0.5)
++    #     e_noised_t2_mask = torch.where(random_mask, ground_truth-0.5, e_noised_t2-0.5)
++
++    #     # forward
++    #     x_pred_t1, e_pred_t1 = self.model.forward(
++    #         task=task, focus_on_node=False, focus_on_edge=True, 
++    #         nodes_feature=nodes_feature, x=x, edges_feature=edges_feature, 
++    #         e=e_noised_t1_mask, mask=random_mask, t=t1, edge_index=edge_index
++    #     )
++    #     x_pred_t2, e_pred_t2 = self.model.forward(
++    #         task=task, focus_on_node=False, focus_on_edge=True, 
++    #         nodes_feature=nodes_feature, x=x, edges_feature=edges_feature, 
++    #         e=e_noised_t2_mask, mask=random_mask, t=t2, edge_index=edge_index
++    #     )
++    #     del x_pred_t1
++    #     del x_pred_t2
++
++    #     # loss
++    #     if self.energy_finetune:
++    #         loss_t1 = self.env.finetune_sparse(e_pred_t1, edges_feature, edge_index)
++    #         loss_t2 = self.env.finetune_sparse(e_pred_t2, edges_feature, edge_index)
++    #     else:
++    #         loss_func = nn.CrossEntropyLoss()
++    #         loss_t1 = loss_func(e_pred_t1, ground_truth)
++    #         loss_t2 = loss_func(e_pred_t2, ground_truth)
++    #     loss = loss_t1 + loss_t2
++    #     return loss
+    
+-    def train_edge_dense_process(
+-        self, task: str, nodes_feature: Tensor, x: Tensor, graph: Tensor, e: Tensor, 
+-        mask: Tensor, ground_truth: Tensor, nodes_num_list: list, raw_data_list: list
+-    ) -> Tensor:
+-        # consistency time
+-        t1: Tensor = torch.randint(1, 1001, size=(1,), device=self.device)
+-        t2 = (self.cm_alpha * t1).int()
++    # def train_edge_dense_process(
++    #     self, task: str, nodes_feature: Tensor, x: Tensor, graph: Tensor, e: Tensor, 
++    #     mask: Tensor, ground_truth: Tensor, nodes_num_list: list, raw_data_list: list
++    # ) -> Tensor:
++    #     # consistency time
++    #     t1: Tensor = torch.randint(1, 1001, size=(1,), device=self.device)
++    #     t2 = (self.cm_alpha * t1).int()
+         
+-        # diffusion (add noise based on ground truth)
+-        e_noised_t1, e_noised_t2 = self.diffusion.consistency_sample_dense(
+-            x=ground_truth, t1=t1, t2=t2
+-        )
++    #     # diffusion (add noise based on ground truth)
++    #     e_noised_t1, e_noised_t2 = self.diffusion.consistency_sample_dense(
++    #         x=ground_truth, t1=t1, t2=t2
++    #     )
+         
+-        # add small random noise
+-        e_small_noise_t1 = 1.0 + self.cm_beta * torch.rand_like(e_noised_t1)
+-        e_small_noise_t2 = 1.0 + self.cm_beta * torch.rand_like(e_noised_t2)
+-        e_noised_t1 = e_noised_t1 * e_small_noise_t1
+-        e_noised_t2 = e_noised_t2 * e_small_noise_t2
++    #     # add small random noise
++    #     e_small_noise_t1 = 1.0 + self.cm_beta * torch.rand_like(e_noised_t1)
++    #     e_small_noise_t2 = 1.0 + self.cm_beta * torch.rand_like(e_noised_t2)
++    #     e_noised_t1 = e_noised_t1 * e_small_noise_t1
++    #     e_noised_t2 = e_noised_t2 * e_small_noise_t2
+          
+-        # random mask
+-        random_mask = self.env.random_mask_dense(
+-            mask=mask, raw_data_list=raw_data_list,
+-            prompt_prob=self.prompt_prob, delta_scale=self.delta_scale
+-        )
++    #     # random mask
++    #     random_mask = self.env.random_mask_dense(
++    #         mask=mask, raw_data_list=raw_data_list,
++    #         prompt_prob=self.prompt_prob, delta_scale=self.delta_scale
++    #     )
+ 
+-        # update label with mask
+-        e_noised_t1_mask = torch.where(random_mask, ground_truth-0.5, e_noised_t1-0.5)
+-        e_noised_t2_mask = torch.where(random_mask, ground_truth-0.5, e_noised_t2-0.5)
++    #     # update label with mask
++    #     e_noised_t1_mask = torch.where(random_mask, ground_truth-0.5, e_noised_t1-0.5)
++    #     e_noised_t2_mask = torch.where(random_mask, ground_truth-0.5, e_noised_t2-0.5)
+         
+-        # forward
+-        x_pred_t1, e_pred_t1 = self.model.forward(
+-            task=task, focus_on_node=False, focus_on_edge=True, 
+-            nodes_feature=nodes_feature, x=x, edges_feature=graph, 
+-            e=e_noised_t1_mask, mask=random_mask, t=t1, edge_index=None
+-        )
+-        x_pred_t2, e_pred_t2 = self.model.forward(
+-            task=task, focus_on_node=False, focus_on_edge=True, 
+-            nodes_feature=nodes_feature, x=x, edges_feature=graph, 
+-            e=e_noised_t2_mask, mask=random_mask, t=t2, edge_index=None
+-        )
+-        del x_pred_t1
+-        del x_pred_t2
++    #     # forward
++    #     x_pred_t1, e_pred_t1 = self.model.forward(
++    #         task=task, focus_on_node=False, focus_on_edge=True, 
++    #         nodes_feature=nodes_feature, x=x, edges_feature=graph, 
++    #         e=e_noised_t1_mask, mask=random_mask, t=t1, edge_index=None
++    #     )
++    #     x_pred_t2, e_pred_t2 = self.model.forward(
++    #         task=task, focus_on_node=False, focus_on_edge=True, 
++    #         nodes_feature=nodes_feature, x=x, edges_feature=graph, 
++    #         e=e_noised_t2_mask, mask=random_mask, t=t2, edge_index=None
++    #     )
++    #     del x_pred_t1
++    #     del x_pred_t2
+         
+-        # loss
+-        if self.energy_finetune:
+-            loss_t1 = self.env.finetune_dense(e_pred_t1, graph)
+-            loss_t2 = self.env.finetune_dense(e_pred_t2, graph)
+-        else:
+-            loss_func = nn.CrossEntropyLoss()
+-            loss_t1 = loss_func(e_pred_t1, ground_truth)
+-            loss_t2 = loss_func(e_pred_t2, ground_truth)
+-        loss = loss_t1 + loss_t2
+-        return loss
++    #     # loss
++    #     if self.energy_finetune:
++    #         loss_t1 = self.env.finetune_dense(e_pred_t1, graph)
++    #         loss_t2 = self.env.finetune_dense(e_pred_t2, graph)
++    #     else:
++    #         loss_func = nn.CrossEntropyLoss()
++    #         loss_t1 = loss_func(e_pred_t1, ground_truth)
++    #         loss_t2 = loss_func(e_pred_t2, ground_truth)
++    #     loss = loss_t1 + loss_t2
++    #     return loss
+     
+     def train_node_sparse_process(
+         self, task: str, nodes_feature: Tensor, x: Tensor, edges_feature: Tensor, e: Tensor, 
+         edge_index: Tensor, graph_list: List[Tensor], mask: Tensor, ground_truth: Tensor, 
+-        nodes_num_list: list, edges_num_list: list, raw_data_list: list
++        nodes_num_list: list, edges_num_list: list, raw_data_list: list,
++        prefix_nodes: List[Tensor], node_prefix_state: Tensor,max_lengths: Tensor | None = None
+     ) -> Tensor:
+         # consistency time
+         t1: Tensor = torch.randint(1, 1001, size=(1,)).to(self.device)
+@@ -173,11 +301,15 @@ class COExpanderCMModel(COExpanderModel):
+             x=ground_truth, t1=t1, t2=t2
+         )
+         
+-        # add small random noise
+-        x_small_noise_t1 = 1.0 + self.cm_beta * torch.rand_like(x_noised_t1)
+-        x_small_noise_t2 = 1.0 + self.cm_beta * torch.rand_like(x_noised_t2)
+-        x_noised_t1 = x_noised_t1 * x_small_noise_t1
+-        x_noised_t2 = x_noised_t2 * x_small_noise_t2
++        # --- New: clamping and small noise ---
++        is_prefix_mask = (node_prefix_state == 1.0).squeeze(-1)
++
++        x_noised_t1 = torch.where(is_prefix_mask, ground_truth, x_noised_t1.long()).float()
++        x_noised_t2 = torch.where(is_prefix_mask, ground_truth, x_noised_t2.long()).float()
++
++        x_noised_t1 = x_noised_t1 * (1.0 + self.cm_beta * torch.rand_like(x_noised_t1))
++        x_noised_t2 = x_noised_t2 * (1.0 + self.cm_beta * torch.rand_like(x_noised_t2))
++        # --- End of addition ---
+         
+         # random mask
+         random_mask = self.env.random_mask_sparse(
+@@ -191,112 +323,269 @@ class COExpanderCMModel(COExpanderModel):
+         x_noised_t2_mask = torch.where(random_mask, ground_truth-0.5, x_noised_t2-0.5)
+         
+         # forward
+-        x_pred_t1, e_pred_t1 = self.model.forward(
++        # --- Changed forward call ---
++        x_pred_t1, _ = self.model.forward(
+             task=task, focus_on_node=True, focus_on_edge=False,
+             nodes_feature=nodes_feature, x=x_noised_t1_mask, 
+             edges_feature=edges_feature, e=e, mask=random_mask, 
+-            t=t1, edge_index=edge_index
++            t=t1, edge_index=edge_index,
++            node_prefix_state=node_prefix_state, prefix_nodes=prefix_nodes, nodes_num_list=nodes_num_list
+         )
+-        x_pred_t2, e_pred_t2 = self.model.forward(
++        x_pred_t2, _ = self.model.forward(
+             task=task, focus_on_node=True, focus_on_edge=False,
+             nodes_feature=nodes_feature, x=x_noised_t2_mask, 
+             edges_feature=edges_feature, e=e, mask=random_mask, 
+-            t=t2, edge_index=edge_index
++            t=t2, edge_index=edge_index,
++            node_prefix_state=node_prefix_state, prefix_nodes=prefix_nodes, nodes_num_list=nodes_num_list
+         )
+-        del e_pred_t1
+-        del e_pred_t2
+         
+-        # loss
+-        if self.energy_finetune:
+-            loss_t1 = self.env.finetune_sparse(x_pred_t1, edges_feature, edge_index)
+-            loss_t2 = self.env.finetune_sparse(x_pred_t2, edges_feature, edge_index)
+-        else:
+-            loss_func = nn.CrossEntropyLoss()
+-            loss_t1 = loss_func(x_pred_t1, ground_truth)
+-            loss_t2 = loss_func(x_pred_t2, ground_truth)
+-        loss = loss_t1 + loss_t2
++        # --- Changed loss computation ---
++        loss_func = nn.CrossEntropyLoss()
++        loss_mask = ~is_prefix_mask
+         
++        # Guard against an empty target when loss_mask is all False
++        if loss_mask.sum() > 0:
++            loss_t1 = loss_func(x_pred_t1[loss_mask], ground_truth[loss_mask])
++            loss_t2 = loss_func(x_pred_t2[loss_mask], ground_truth[loss_mask])
++        else: # If all nodes are in the prefix, the loss is 0
++            loss_t1 = torch.tensor(0.0, device=self.device)
++            loss_t2 = torch.tensor(0.0, device=self.device)
++            
++        loss = loss_t1 + loss_t2
+         return loss
++# original inference_edge_sparse_process:
++    # def inference_edge_sparse_process(
++    #     self, task: str, nodes_feature: Tensor, x: Tensor, edges_feature: Tensor, e: Tensor, 
++    #     edge_index: Tensor, graph_list: List[Tensor], mask: Tensor, ground_truth: Tensor, 
++    #     nodes_num_list: list, edges_num_list: list, raw_data_list: list
++    # ) -> Union[Tensor, Tuple[Tensor, Tensor]]:
++    #     # determinate_steps and max_steps
++    #     current_determinate_steps = 0
++    #     if task == "TSP":
++    #         max_steps_list = get_tsp_max_steps_list(
++    #             nodes_num=nodes_num_list[0],
++    #             determinate_steps=self.determinate_steps,
++    #             inference_steps=self.inference_steps
++    #         )
++    #     else:
++    #         raise NotImplementedError()
++        
++    #     # while loop, until all nodes are determined
++    #     while not mask.all():
++        
++    #         # random init
++    #         e_noised = (torch.randn_like(e) > 0).float()
++            
++    #         # denoise steps
++    #         for i in range(self.inference_steps):
++    #             # consistency time
++    #             t1, t2 = self.time_schedule(i)
++    #             t1 = torch.tensor([t1], device=self.device).float()
++                
++    #             # add small random noise
++    #             e_small_noise = 1.0 + self.cm_beta * torch.rand_like(e_noised)
++    #             e_noised = e_noised * e_small_noise 
++                
++    #             # mask
++    #             e_noised_mask = torch.where(mask, e-0.5, e_noised-0.5)
++
++    #             # forward
++    #             x_pred, e_pred = self.model.forward(
++    #                 task=task, focus_on_node=False, focus_on_edge=True, 
++    #                 nodes_feature=nodes_feature, x=x, edges_feature=edges_feature, 
++    #                 e=e_noised_mask, mask=mask, t=t1, edge_index=edge_index
++    #             )
++    #             del x_pred
++                
++    #             # softmax
++    #             e_pred_softmax = e_pred.softmax(-1)
++                
++    #             # t2
++    #             if t2 != 0:
++    #                 e_pred_ber = torch.bernoulli(e_pred_softmax[..., 1].clamp(0, 1))
++    #                 e_pred_ber_onehot: Tensor = F.one_hot(e_pred_ber.long(), num_classes=2)
++    #                 Q_bar = torch.from_numpy(self.diffusion.Q_bar[t2]).float().to(self.device)
++    #                 e_prob = torch.matmul(e_pred_ber_onehot.float(), Q_bar)
++    #                 e_noised = torch.bernoulli(e_prob[..., 1].clamp(0, 1))
+ 
++    #         # heatmap
++    #         e_heatmap = e_pred_softmax[:, 1]
++            
++    #         # determine action
++    #         continue_flag = not (current_determinate_steps < self.determinate_steps - 1)
++    #         e, mask = self.env.update_mask_sparse(
++    #             heatmap=e_heatmap, x=x, e=e, graph_list=graph_list, mask=mask, 
++    #             nodes_num_list=nodes_num_list, edges_num_list=edges_num_list,
++    #             max_steps=max_steps_list[current_determinate_steps], 
++    #             continue_flag=continue_flag, beam_size=self.beam_size
++    #         )
++    #         current_determinate_steps += 1
++    #         if current_determinate_steps == self.determinate_steps:
++    #             break
++            
++    #     # return loss and heatmap if mode is ``val``
++    #     if self.env.mode == "val":
++    #         loss_func = nn.CrossEntropyLoss()
++    #         loss = loss_func(e_pred, ground_truth)
++    #         return loss, e
++        
++    #     # return heatmap if mode is ``solve``
++    #     if self.env.mode == "solve":
++    #         return e
++    
++# --- Modified inference_edge_sparse_process ---
+     def inference_edge_sparse_process(
+-        self, task: str, nodes_feature: Tensor, x: Tensor, edges_feature: Tensor, e: Tensor, 
+-        edge_index: Tensor, graph_list: List[Tensor], mask: Tensor, ground_truth: Tensor, 
+-        nodes_num_list: list, edges_num_list: list, raw_data_list: list
++        self, task: str, nodes_feature: Tensor | None, x: Tensor | None,
++        edges_feature: Tensor | None, e: Tensor | None, edge_index: Tensor,
++        graph_list: List[Tensor], mask: Tensor, ground_truth: Tensor | None, # ground_truth may be None
++        nodes_num_list: list, edges_num_list: list, raw_data_list: list,
++        prefix_nodes: List[Tensor], node_prefix_state: Tensor | None,
++        max_lengths: Tensor | None # New: max_lengths
+     ) -> Union[Tensor, Tuple[Tensor, Tensor]]:
+-        # determinate_steps and max_steps
++
++        # Identify prefix edges and build the mask (same as in training)
++        node_cumsum = torch.cat([torch.tensor([0], device=edge_index.device),
++                                 torch.cumsum(torch.tensor(nodes_num_list, device=edge_index.device), dim=0)[:-1]])
++        edge_batch_vector = torch.repeat_interleave(torch.arange(len(nodes_num_list), device=edge_index.device),
++                                                    torch.tensor(edges_num_list, device=edge_index.device))
++        is_prefix_edge_mask = torch.zeros_like(mask, dtype=torch.bool) # mask (E,)
++        edge_map = _get_edge_map(edge_index)
++
++        for b_idx in range(len(nodes_num_list)):
++             prefix_k = len(prefix_nodes[b_idx])
++             if prefix_k > 1:
++                # --- FIX: Move prefix_nodes[b_idx] to the correct device ---
++                 p_nodes_local = prefix_nodes[b_idx].to(node_cumsum.device) # Move to GPU
++                 p_nodes_global = p_nodes_local + node_cumsum[b_idx]
++                 # --- End FIX ---
++                 for j in range(prefix_k - 1):
++                      u_global, v_global = p_nodes_global[j].item(), p_nodes_global[j+1].item()
++                      edge_key = tuple(sorted((u_global, v_global)))
++                      if edge_key in edge_map:
++                           edge_idx = edge_map[edge_key]
++                           if edge_batch_vector[edge_idx] == b_idx: # Ensure edge belongs to this graph
++                                is_prefix_edge_mask[edge_idx] = True
++
++        # Initialize the edge variables 'e' with prefix edges set to 1
++        e = torch.where(is_prefix_edge_mask, torch.ones_like(e), e).float()
++        # Initialize 'mask' with prefix edges set to True (known)
++        mask = mask | is_prefix_edge_mask
++
++        # determinate_steps and max_steps (unchanged)
+         current_determinate_steps = 0
+-        if task == "TSP":
++        # OP may need a different max_steps strategy; use the TSP one for now
++        if task == "TSP" or task == "OP": # Apply TSP logic to OP for now
+             max_steps_list = get_tsp_max_steps_list(
+                 nodes_num=nodes_num_list[0],
+                 determinate_steps=self.determinate_steps,
+                 inference_steps=self.inference_steps
+             )
+         else:
++            max_steps_list = [-1] * self.determinate_steps
++
+             raise NotImplementedError()
+-        
+-        # while loop, until all nodes are determined
++
++
++        # Inference loop
++        e_pred_final = None # Store final prediction before determination steps
+         while not mask.all():
+-        
+-            # random init
+-            e_noised = (torch.randn_like(e) > 0).float()
+-            
++            # random init (only for non-masked / non-prefix parts)
++            noise = (torch.randn_like(e) > 0).float()
++            e_noised = torch.where(mask, e, noise) # Start with known parts + noise
++
+             # denoise steps
+             for i in range(self.inference_steps):
+-                # consistency time
+                 t1, t2 = self.time_schedule(i)
+-                t1 = torch.tensor([t1], device=self.device).float()
+-                
+-                # add small random noise
+-                e_small_noise = 1.0 + self.cm_beta * torch.rand_like(e_noised)
+-                e_noised = e_noised * e_small_noise 
+-                
+-                # mask
+-                e_noised_mask = torch.where(mask, e-0.5, e_noised-0.5)
++                t1_tensor = torch.tensor([t1], device=self.device).float()
++                # Repeat t1 tensor for batch size if needed (e.g., if max_lengths is available)
++                batch_size_t = max_lengths.size(0) if max_lengths is not None else 1
++                t1_tensor_batched = t1_tensor.repeat(batch_size_t)
+ 
+-                # forward
+-                x_pred, e_pred = self.model.forward(
+-                    task=task, focus_on_node=False, focus_on_edge=True, 
+-                    nodes_feature=nodes_feature, x=x, edges_feature=edges_feature, 
+-                    e=e_noised_mask, mask=mask, t=t1, edge_index=edge_index
++
++                # add small random noise (only for non-masked / non-prefix parts)
++                small_noise = 1.0 + self.cm_beta * torch.rand_like(e_noised)
++                e_noised = torch.where(mask, e_noised, e_noised * small_noise)
++
++                # Convert input e to [-0.5, 0.5]
++                e_noised_input = e_noised - 0.5
++
++                # forward (pass max_lengths)
++                _, e_pred = self.model.forward(
++                    task=task, focus_on_node=False, focus_on_edge=True,
++                    nodes_feature=nodes_feature, x=x, edges_feature=edges_feature,
++                    e=e_noised_input, mask=mask, t=t1_tensor_batched, edge_index=edge_index, # Pass batched time
++                    node_prefix_state=node_prefix_state, prefix_nodes=prefix_nodes, nodes_num_list=nodes_num_list,
++                    max_lengths=max_lengths # <-- pass max_lengths
+                 )
+-                del x_pred
+-                
++
+                 # softmax
+                 e_pred_softmax = e_pred.softmax(-1)
+-                
+-                # t2
++                e_pred_prob_one = e_pred_softmax[..., 1].clamp(0, 1) # Probability of edge being 1
++
++                # --- New: clamp prefix-edge predictions at inference ---
++                # Before computing the next e_noised, force the predicted probability of prefix edges to 1.0
++                e_pred_prob_one_clamped = torch.where(is_prefix_edge_mask, torch.ones_like(e_pred_prob_one), e_pred_prob_one)
++
++
++                # t2 step (uses the clamped probabilities)
+                 if t2 != 0:
+-                    e_pred_ber = torch.bernoulli(e_pred_softmax[..., 1].clamp(0, 1))
+-                    e_pred_ber_onehot: Tensor = F.one_hot(e_pred_ber.long(), num_classes=2)
++                    e_pred_ber = torch.bernoulli(e_pred_prob_one_clamped)
++                    e_pred_ber_onehot: Tensor = F.one_hot(e_pred_ber.long(), num_classes=2).float()
+                     Q_bar = torch.from_numpy(self.diffusion.Q_bar[t2]).float().to(self.device)
+-                    e_prob = torch.matmul(e_pred_ber_onehot.float(), Q_bar)
++                    e_prob = torch.matmul(e_pred_ber_onehot, Q_bar)
+                     e_noised = torch.bernoulli(e_prob[..., 1].clamp(0, 1))
++                    # Make sure prefix edges in e_noised are still 1
++                    e_noised = torch.where(is_prefix_edge_mask, torch.ones_like(e_noised), e_noised)
++                else:
++                    # Last step: use clamped probabilities directly
++                    e_noised = torch.bernoulli(e_pred_prob_one_clamped)
++                    e_noised = torch.where(is_prefix_edge_mask, torch.ones_like(e_noised), e_noised)
+ 
+-            # heatmap
+-            e_heatmap = e_pred_softmax[:, 1]
+-            
+-            # determine action
++
++            # heatmap (use the raw prediction of the last step, before clamping)
++            e_heatmap = e_pred_prob_one # Use non-clamped probabilities for final determination heuristic
++
++            # --- store final prediction for validation loss calculation if needed ---
++            e_pred_final = e_pred # Store logits/pre-softmax
++
++            # determine action (update mask and e)
+             continue_flag = not (current_determinate_steps < self.determinate_steps - 1)
++            # update_mask needs to know which edges are prefix edges so it does not modify them
++            # May require changing update_mask or handling it here
++            # Simplification: assume update_mask never changes entries of mask that are already True
+             e, mask = self.env.update_mask_sparse(
+-                heatmap=e_heatmap, x=x, e=e, graph_list=graph_list, mask=mask, 
+-                nodes_num_list=nodes_num_list, edges_num_list=edges_num_list,
+-                max_steps=max_steps_list[current_determinate_steps], 
+-                continue_flag=continue_flag, beam_size=self.beam_size
++                 heatmap=e_heatmap, x=x, e=e, graph_list=graph_list, mask=mask, # Pass current 'e' and 'mask'
++                 nodes_num_list=nodes_num_list, edges_num_list=edges_num_list,
++                 max_steps=max_steps_list[current_determinate_steps],
++                 continue_flag=continue_flag, beam_size=self.beam_size
++                 # Potentially pass is_prefix_edge_mask to update_mask if needed
+             )
+             current_determinate_steps += 1
+             if current_determinate_steps == self.determinate_steps:
+                 break
+-            
+-        # return loss and heatmap if mode is ``val``
++
++
++        # --- Changed return logic ---
++        # `vars` should be either the final edge variables `e` (0 or 1) or the heatmap `e_heatmap` used for decoding
++        # For decoding, the heatmap usually works better.
++        final_vars_for_decode = e_heatmap # Use the last predicted probabilities
++
+         if self.env.mode == "val":
+-            loss_func = nn.CrossEntropyLoss()
+-            loss = loss_func(e_pred, ground_truth)
+-            return loss, e
+-        
+-        # return heatmap if mode is ``solve``
+-        if self.env.mode == "solve":
+-            return e
+-    
++            loss = torch.tensor(0.0, device=self.device) # Default loss
++            if ground_truth is not None and e_pred_final is not None:
++                loss_func = nn.CrossEntropyLoss()
++                loss_mask = ~is_prefix_edge_mask # Only compute loss on non-prefix edges
++                target = ground_truth[loss_mask]
++                pred = e_pred_final[loss_mask]
++                if target.numel() > 0:
++                    loss = loss_func(pred, target)
++            return loss, final_vars_for_decode # Return heatmap for validation cost calculation
++        elif self.env.mode == "solve":
++            return final_vars_for_decode # Return heatmap for decoding
++        else: # Should not happen
++             return final_vars_for_decode
++
++
+     def inference_edge_dense_process(
+         self, task: str, nodes_feature: Tensor, x: Tensor, graph: Tensor, e: Tensor, 
+         mask: Tensor, ground_truth: Tensor, nodes_num_list: list, raw_data_list: list
+@@ -389,46 +678,48 @@ class COExpanderCMModel(COExpanderModel):
+         if self.env.mode == "solve":
+             return e
+ 
++    # --- THIS IS THE METHOD THAT NEEDS FIXING ---
+     def inference_node_sparse_process(
+         self, task: str, nodes_feature: Tensor, x: Tensor, edges_feature: Tensor, e: Tensor, 
+         edge_index: Tensor, graph_list: List[Tensor], mask: Tensor, ground_truth: Tensor, 
+-        nodes_num_list: list, edges_num_list: list, raw_data_list: list
++        nodes_num_list: list, edges_num_list: list, raw_data_list: list,
++        prefix_nodes: List[Tensor], node_prefix_state: Tensor, # <-- Add the missing arguments
++        max_lengths: Tensor | None = None # <-- *** ADD THIS ARGUMENT ***
+     ) -> Union[Tensor, Tuple[Tensor, Tensor]]:
+-        # determinate_steps
++        
++        is_prefix_mask = (node_prefix_state == 1.0).squeeze(-1)
++        if ground_truth is not None:
++            x = torch.where(is_prefix_mask, ground_truth, x.long()).float()
++        
+         current_determinate_steps = 0
+         max_steps = len(x) // self.determinate_steps
+         
+-        # while loop, until all nodes are determined
+         while not mask.all():
+-            # random init
+             x_noised = (torch.randn_like(x) > 0).long().float()
+             
+-            # inference denoise steps
+             for i in range(self.inference_steps):
+-                # consistency time
+                 t1, t2 = self.time_schedule(i)
+                 t1 = torch.tensor([t1], device=self.device).float()
+                 
+-                # add small random noise
+                 x_small_noise = 1.0 + self.cm_beta * torch.rand_like(x_noised)
+                 x_noised = x_noised * x_small_noise
+                 
+-                # mask
+-                x_noised_mask = torch.where(mask, x-0.5, x_noised-0.5)
++                x_noised_clamped = torch.where(is_prefix_mask, ground_truth, x_noised.long()).float()
++                mask_clamped = mask | is_prefix_mask
++                
++                x_noised_mask = torch.where(mask_clamped, x-0.5, x_noised_clamped-0.5)
+ 
+-                # forward
+                 x_pred, e_pred = self.model.forward(
+                     task=task, focus_on_node=True, focus_on_edge=False, 
+                     nodes_feature=nodes_feature, x=x_noised_mask, 
+-                    edges_feature=edges_feature, e=e, mask=mask, 
+-                    t=t1, edge_index=edge_index
++                    edges_feature=edges_feature, e=e, mask=mask_clamped, 
++                    t=t1, edge_index=edge_index,
++                    node_prefix_state=node_prefix_state, prefix_nodes=prefix_nodes, nodes_num_list=nodes_num_list
+                 )
+                 del e_pred
+                 
+-                # softmax
+                 x_pred_softmax = x_pred.softmax(-1)
+ 
+-                # t2
+                 if t2 != 0:
+                     x_pred_ber = torch.bernoulli(x_pred_softmax[..., 1].clamp(0, 1))
+                     x_pred_ber_onehot: Tensor = F.one_hot(x_pred_ber.long(), num_classes=2)
+@@ -436,13 +727,12 @@ class COExpanderCMModel(COExpanderModel):
+                     x_prob = torch.matmul(x_pred_ber_onehot.float(), Q_bar)
+                     x_noised = torch.bernoulli(x_prob[..., 1].clamp(0, 1))
+         
+-            # heatmap
+             x_heatmap = x_pred_softmax[:, 1]
++            x_heatmap_clamped = torch.where(is_prefix_mask, ground_truth.float(), x_heatmap)
+ 
+-            # determine action
+             continue_flag = not (current_determinate_steps < self.determinate_steps - 1)
+             x, mask = self.env.update_mask_sparse(
+-                heatmap=x_heatmap, x=x, e=e, graph_list=graph_list, mask=mask, 
++                heatmap=x_heatmap_clamped, x=x, e=e, graph_list=graph_list, mask=mask, 
+                 nodes_num_list=nodes_num_list, edges_num_list=edges_num_list,
+                 max_steps=max_steps, continue_flag=continue_flag, beam_size=self.beam_size
+             )
+@@ -450,15 +740,20 @@ class COExpanderCMModel(COExpanderModel):
+             if current_determinate_steps == self.determinate_steps:
+                 break
+             
+-        # return loss and determined variables if mode is ``val``
++        # *** FIX STARTS HERE ***
++        # The original code only returned values inside conditional blocks.
++        # This ensures a value is always returned for any mode other than "val".
+         if self.env.mode == "val":
+             loss_func = nn.CrossEntropyLoss()
+-            loss = loss_func(x_pred, ground_truth)
++            loss_mask = ~is_prefix_mask
++            if ground_truth is not None and loss_mask.sum() > 0:
++                loss = loss_func(x_pred[loss_mask], ground_truth[loss_mask])
++            else:
++                loss = torch.tensor(0.0, device=self.device)
+             return loss, x
+-        
+-        # return determined variables if mode is ``solve``
+-        if self.env.mode == "solve":
++        else: # Covers "solve" and any other case
+             return x
++        # *** FIX ENDS HERE ***
+         
+         
+ def get_tsp_max_steps_list(
+@@ -467,6 +762,59 @@ def get_tsp_max_steps_list(
+     # if determinate_steps is 1, just return [-1]
+     if determinate_steps == 1:
+         return [-1]
++    elif determinate_steps == 2:
++        # Linear schedule: [0.2, 0.4, 0.6, 0.8, -1]
++        steps_list = [int(i / 2 * nodes_num) for i in range(1, 2)]
++        steps_list.append(-1)
++        return steps_list
++    elif determinate_steps == 3:
++        # Linear schedule: [0.2, 0.4, 0.6, 0.8, -1]
++        steps_list = [int(i / 3 * nodes_num) for i in range(1, 3)]
++        steps_list.append(-1)
++        return steps_list
++    
++    if determinate_steps == 5:
++         # Exactly 5 values are required; the last one is -1
++         return [int(0.2*nodes_num), int(0.4*nodes_num), int(0.6*nodes_num), int(0.8*nodes_num), -1] # These ratios need careful tuning
++    elif determinate_steps == 4:
++        # Linear schedule: [0.2, 0.4, 0.6, 0.8, -1]
++        steps_list = [int(i / 4 * nodes_num) for i in range(1, 4)]
++        steps_list.append(-1)
++        return steps_list
++
++    elif determinate_steps == 8:
++        # Linear schedule: [1/20, 2/20, ..., 19/20, -1]
++        steps_list = [int(i / 8 * nodes_num) for i in range(1, 8)]
++        steps_list.append(-1)
++        return steps_list
++
++    elif determinate_steps == 10:
++        # Linear schedule: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, -1]
++        steps_list = [int(i / 10 * nodes_num) for i in range(1, 10)]
++        steps_list.append(-1)
++        return steps_list
++    elif determinate_steps == 12:
++        # Linear schedule: [1/12, 2/20, ..., 19/20, -1]
++        steps_list = [int(i / 12 * nodes_num) for i in range(1, 12)]
++        steps_list.append(-1)
++        return steps_list
++    
++    elif determinate_steps == 15:
++        # Linear schedule: [1/15, 2/15, ..., 14/15, -1]
++        steps_list = [int(i / 15 * nodes_num) for i in range(1, 15)]
++        steps_list.append(-1)
++        return steps_list
++    elif determinate_steps == 18:
++        # Linear schedule: [1/15, 2/15, ..., 14/15, -1]
++        steps_list = [int(i / 18 * nodes_num) for i in range(1, 18)]
++        steps_list.append(-1)
++        return steps_list
++
++    elif determinate_steps == 20:
++        # Linear schedule: [1/20, 2/20, ..., 19/20, -1]
++        steps_list = [int(i / 20 * nodes_num) for i in range(1, 20)]
++        steps_list.append(-1)
++        return steps_list
+     
+     # assert determinate_steps is 3
+     assert determinate_steps == 3
+diff --git a/co_expander/model/decoder/decode/mis.py b/co_expander/model/decoder/decode/mis.py
+index 061bcdb..ed154e4 100644
+--- a/co_expander/model/decoder/decode/mis.py
++++ b/co_expander/model/decoder/decode/mis.py
+@@ -1,3 +1,5 @@
++# co_expander/model/decoder/decode/mis.py
++
+ import numpy as np
+ from torch import Tensor
+ from typing import Union, List
+@@ -9,6 +11,22 @@ def mis_sparse_decode(
+     graph_list: List[Tensor], 
+     nodes_num_list: list, 
+     return_cost: bool, 
++    # --- Add unused arguments to match the function call signature ---
++    # These are passed by `*batch_data` but may not be used in this specific function
++    task: str = None,
++    nodes_feature: Tensor = None,
++    x: Tensor = None,
++    edges_feature: Tensor = None,
++    e: Tensor = None,
++    edge_index: Tensor = None,
++    mask: Tensor = None,
++    ground_truth: Tensor = None,
++    edges_num_list: list = None,
++    raw_data_list: list = None,
++    prefix_nodes: List[Tensor] = None,
++    node_prefix_state: Tensor = None,
++    max_lengths: Tensor | None = None,
++    # --- RLSA arguments ---
+     use_rlsa: bool = True, 
+     rlsa_tau: float = 0.01, 
+     rlsa_d: int = 5, 
+diff --git a/co_expander/model/decoder/decode/op.py b/co_expander/model/decoder/decode/op.py
+new file mode 100644
+index 0000000..cb2e0d5
+--- /dev/null
++++ b/co_expander/model/decoder/decode/op.py
+@@ -0,0 +1,141 @@
++# co_expander_edit/model/decoder/decode/op.py
++
++import torch
++import numpy as np
++from torch import Tensor
++from typing import Union, List, Dict, Tuple, Any
++from ml4co_kit import to_numpy, check_dim
++
++# --- OP metric computation (from evaluation_op100.py) ---
++def calculate_op_metrics(instance_locs: np.ndarray, tour: List[int], prizes: np.ndarray) -> Tuple[float, float]:
++    """Calculates the total prize and distance for an OP solution."""
++    if not tour: return 0.0, 0.0
++    full_tour_indices = [0] + tour + [0]
++    tour_locs = instance_locs[full_tour_indices]
++    tour_distances = np.sqrt(np.sum((tour_locs[:-1] - tour_locs[1:])**2, axis=1))
++    total_distance = np.sum(tour_distances).item()
++    total_prize = prizes[tour].sum().item()
++    return total_prize, total_distance
++
++# --- OP decoding function (from evaluation_op100.py, slightly modified) ---
++def decode_op_solution_from_heatmap(
++    adj_probs: np.ndarray, # Heatmap for edges in k-NN graph
++    edge_index: np.ndarray, # (2, E)
++    coords: np.ndarray,     # (N, 2)
++    prizes: np.ndarray,     # (N,)
++    max_length: float,
++    nodes_num: int
++) -> List[int]:
++    """Constructs an OP solution from a sparse heatmap using a guided greedy heuristic."""
++
++    # 1. Rebuild or approximate the dense probability matrix (optional but helpful for understanding)
++    #    A more efficient approach is to use the sparse adj_probs and edge_index directly
++    #    Here we emulate an adjacency list with a dict
++    adj_prob_dict = {}
++    for i in range(edge_index.shape[1]):
++        u, v = edge_index[0, i], edge_index[1, i]
++        prob = adj_probs[i]
++        adj_prob_dict.setdefault(u, {})[v] = prob
++        adj_prob_dict.setdefault(v, {})[u] = prob # Assume symmetry
++
++    # 2. Compute pairwise distances between all nodes
++    dists = np.linalg.norm(coords[:, np.newaxis, :] - coords[np.newaxis, :, :], axis=-1)
++
++    # 3. Greedy decoding
++    unvisited_customers = set(range(1, nodes_num))
++    tour = []
++    current_node = 0
++    current_length = 0.0
++
++    while unvisited_customers:
++        best_score = -float('inf')
++        best_next_node = -1
++
++        potential_next_nodes = list(unvisited_customers)
++        np.random.shuffle(potential_next_nodes) # Add randomness in tie-breaking
++
++        for next_node in potential_next_nodes:
++            # Check feasibility
++            potential_new_length = current_length + dists[current_node, next_node] + dists[next_node, 0]
++
++            if potential_new_length <= max_length:
++                # Get edge probability (handle missing edges in sparse graph)
++                prob = adj_prob_dict.get(current_node, {}).get(next_node, 0.0) # Default to 0 if edge not in kNN
++
++                # Score: prize * prob / distance
++                score = (prizes[next_node] * prob) / (dists[current_node, next_node] + 1e-6)
++
++                if score > best_score:
++                    best_score = score
++                    best_next_node = next_node
++
++        if best_next_node != -1:
++            tour.append(best_next_node)
++            current_length += dists[current_node, best_next_node]
++            current_node = best_next_node
++            unvisited_customers.remove(best_next_node)
++        else:
++            break # No feasible node found
++
++    return tour
++
++# --- Main decoding interface ---
++def op_sparse_decode(
++    vars: Tensor,           # (E_batch,) Predicted edge probabilities (heatmap)
++    nodes_feature: Tensor, # (V_batch, 3) IsDepot, Prize, IsPrefix
++    edge_index: Tensor,    # (2, E_batch)
++    nodes_num_list: list,
++    edges_num_list: list,
++    raw_data_list: list,   # List of (coords, prizes, max_length, ref_tour) tuples
++    return_cost: bool,
++    # --- Other parameters that may be needed (from *batch_data_dict) ---
++    task: str = None, x: Tensor = None, edges_feature: Tensor = None, e: Tensor = None,
++    graph_list: List[Tensor] = None, mask: Tensor = None, ground_truth: Tensor = None,
++    prefix_nodes: List[Tensor] = None, node_prefix_state: Tensor = None,
++    max_lengths: Tensor = None, # Batched max_lengths
++    # --- Decoder-specific parameters ---
++    use_ls: bool = False, # Placeholder for potential local search
++    **kwargs # Catch other decode_kwargs
++) -> Union[List[np.ndarray], np.floating]:
++
++    heatmap_np = to_numpy(vars)
++    edge_index_np = to_numpy(edge_index)
++
++    solutions = []
++    total_reward = 0.0
++    node_offset = 0
++    edge_offset = 0
++
++    for i in range(len(nodes_num_list)):
++        nodes_num = nodes_num_list[i]
++        edges_num = edges_num_list[i]
++
++        # Extract data for the current instance
++        instance_heatmap = heatmap_np[edge_offset : edge_offset + edges_num]
++        instance_edge_index = edge_index_np[:, edge_offset : edge_offset + edges_num] - node_offset
++        instance_coords, instance_prizes, instance_max_length, _ = raw_data_list[i] # Get from raw_data
++
++        # Decode the tour
++        decoded_tour = decode_op_solution_from_heatmap(
++            adj_probs=instance_heatmap,
++            edge_index=instance_edge_index,
++            coords=instance_coords,
++            prizes=instance_prizes,
++            max_length=instance_max_length,
++            nodes_num=nodes_num
++        )
++
++        solutions.append(np.array(decoded_tour, dtype=np.int64))
++
++        if return_cost:
++             reward, _ = calculate_op_metrics(instance_coords, decoded_tour, instance_prizes)
++             total_reward += reward
++
++        # Update offsets
++        node_offset += nodes_num
++        edge_offset += edges_num
++
++    if return_cost:
++        return total_reward / len(nodes_num_list) if nodes_num_list else 0.0
++    else:
++        return solutions
+\ No newline at end of file
+diff --git a/co_expander/model/decoder/decoder.py b/co_expander/model/decoder/decoder.py
+index f4d3659..ac0dbb8 100644
+--- a/co_expander/model/decoder/decoder.py
++++ b/co_expander/model/decoder/decoder.py
+@@ -1,3 +1,5 @@
++# co_expander/model/decoder/decoder.py
++
+ import numpy as np
+ from torch import Tensor
+ from typing import Union, List
+@@ -8,66 +10,151 @@ from co_expander.model.decoder.decode.mcut import mcut_sparse_decode
+ from co_expander.model.decoder.decode.mis import mis_sparse_decode
+ from co_expander.model.decoder.decode.mvc import mvc_sparse_decode
+ from co_expander.model.decoder.decode.tsp import tsp_dense_decode, tsp_sparse_decode
+-
+-
++from typing import Union, List, Dict # <-- added Dict
++from co_expander.model.decoder.decode.op import op_sparse_decode # <-- new import
+ class COExpanderDecoder(object):
+     def __init__(self, decode_kwargs: dict = {}) -> None:
+         self.decode_kwargs = decode_kwargs
+ 
+-    def sparse_decode(
+-        self, vars: Tensor, task: str, nodes_feature: Tensor, x: Tensor, 
+-        edges_feature: Tensor, e: Tensor, edge_index: Tensor, graph_list: List[Tensor], 
+-        mask: Tensor, ground_truth: Tensor, nodes_num_list: list, edges_num_list: list, 
+-        raw_data_list: list, return_cost: bool = False
+-    ) -> Union[List[np.ndarray], np.floating]:
+-        if task == "MCl":
+-            return mcl_sparse_decode(
+-                vars=vars, graph_list=graph_list, nodes_num_list=nodes_num_list, 
+-                return_cost=return_cost, **self.decode_kwargs
+-            )
+-        elif task == "MCut":
+-            return mcut_sparse_decode(
+-                vars=vars, edge_index=edge_index, graph_list=graph_list,
+-                nodes_num_list=nodes_num_list, edges_num_list=edges_num_list,
+-                return_cost=return_cost, **self.decode_kwargs
+-            )
+-        elif task == "MIS":
+-            return mis_sparse_decode(
+-                vars=vars, graph_list=graph_list, nodes_num_list=nodes_num_list, 
+-                return_cost=return_cost, **self.decode_kwargs
+-            )
+-        elif task == "MVC":
+-            return mvc_sparse_decode(
+-                vars=vars, graph_list=graph_list, nodes_num_list=nodes_num_list, 
+-                return_cost=return_cost, **self.decode_kwargs
+-            )
+-        elif task == "TSP":
+-            return tsp_sparse_decode(
+-                vars=vars, nodes_feature=nodes_feature, edge_index=edge_index,
+-                nodes_num_list=nodes_num_list, edges_num_list=edges_num_list,
+-                return_cost=return_cost, **self.decode_kwargs
+-            )
+-        else:
+-            raise NotImplementedError()
++    # def sparse_decode(
++    #     self, vars: Tensor, *args, return_cost: bool = False
++    # ) -> Union[List[np.ndarray], np.floating]:
+         
++    #     # Unpack the task from args
++    #     task = args[0]
++        
++    #     # --- Create a dictionary of arguments for clarity ---
++    #     batch_data_dict = {
++    #         "task": task,
++    #         "nodes_feature": args[1],
++    #         "x": args[2],
++    #         "edges_feature": args[3],
++    #         "e": args[4],
++    #         "edge_index": args[5],
++    #         "graph_list": args[6],
++    #         "mask": args[7],
++    #         "ground_truth": args[8],
++    #         "nodes_num_list": args[9],
++    #         "edges_num_list": args[10],
++    #         "raw_data_list": args[11],
++    #         "prefix_nodes": args[12],
++    #         "node_prefix_state": args[13],
++            
++    #     }
++        
++    #     if task == "MCl":
++    #         return mcl_sparse_decode(
++    #             vars=vars, return_cost=return_cost, **batch_data_dict, **self.decode_kwargs
++    #         )
++    #     elif task == "MCut":
++    #         return mcut_sparse_decode(
++    #             vars=vars, return_cost=return_cost, **batch_data_dict, **self.decode_kwargs
++    #         )
++    #     elif task == "MIS":
++    #         return mis_sparse_decode(
++    #             vars=vars, return_cost=return_cost, **batch_data_dict, **self.decode_kwargs
++    #         )
++    #     elif task == "MVC":
++    #         return mvc_sparse_decode(
++    #             vars=vars, return_cost=return_cost, **batch_data_dict, **self.decode_kwargs
++    #         )
++    #     elif task == "TSP":
++    #         return tsp_sparse_decode(
++    #             vars=vars, return_cost=return_cost, **batch_data_dict, **self.decode_kwargs
++    #         )
++    #     else:
++    #         raise NotImplementedError()
++        
++    def sparse_decode(
++            self, vars: Tensor, *args, return_cost: bool = False
++        ) -> Union[List[np.ndarray], np.floating]:
++
++            # Unpack arguments more carefully, knowing OP has 15 total (task + 14 data)
++            task = args[0]
++            nodes_feature = args[1]
++            x = args[2]
++            edges_feature = args[3]
++            e = args[4]
++            edge_index = args[5]
++            graph_list = args[6]
++            mask = args[7]
++            ground_truth = args[8]
++            nodes_num_list = args[9]
++            edges_num_list = args[10]
++            raw_data_list = args[11]
++            prefix_nodes = args[12]
++            node_prefix_state = args[13]
++            max_lengths = args[14] if len(args) > 14 else None # Handle potential absence
++
++
++            # --- Create dictionary with all unpacked args ---
++            batch_data_dict = {
++                "task": task, "nodes_feature": nodes_feature, "x": x, "edges_feature": edges_feature,
++                "e": e, "edge_index": edge_index, "graph_list": graph_list, "mask": mask,
++                "ground_truth": ground_truth, "nodes_num_list": nodes_num_list,
++                "edges_num_list": edges_num_list, "raw_data_list": raw_data_list,
++                "prefix_nodes": prefix_nodes, "node_prefix_state": node_prefix_state,
++                "max_lengths": max_lengths # Include max_lengths
++            }
++    # --- Task Dispatching ---
++            if task == "OP":
++                # Pass relevant arguments explicitly or via dict
++                return op_sparse_decode(
++                    vars=vars, return_cost=return_cost, **batch_data_dict, **self.decode_kwargs
++                )
++            elif task == "MCl":
++                return mcl_sparse_decode(
++                    vars=vars, return_cost=return_cost, **batch_data_dict, **self.decode_kwargs
++                )
++            elif task == "MCut":
++                return mcut_sparse_decode(
++                    vars=vars, return_cost=return_cost, **batch_data_dict, **self.decode_kwargs
++                )
++            elif task == "MIS":
++                return mis_sparse_decode(
++                    vars=vars, return_cost=return_cost, **batch_data_dict, **self.decode_kwargs
++                )
++            elif task == "MVC":
++                return mvc_sparse_decode(
++                    vars=vars, return_cost=return_cost, **batch_data_dict, **self.decode_kwargs
++                )
++            elif task == "TSP":
++                return tsp_sparse_decode(
++                    vars=vars, return_cost=return_cost, **batch_data_dict, **self.decode_kwargs
++                )
++            else:
++                raise NotImplementedError(f"Sparse decode not implemented for task {task}") 
++
+     def dense_decode(
+-        self, vars: Tensor, task: str, nodes_feature: Tensor, x: Tensor, 
+-        graph: Tensor, e: Tensor, mask: Tensor, ground_truth: Tensor, 
+-        nodes_num_list: list, raw_data_list: list, return_cost: bool = False
++        self, vars: Tensor, *args, return_cost: bool = False
+     ) -> Union[List[np.ndarray], np.floating]:
++        
++        task = args[0]
++        
++        # Create a dictionary for dense data
++        batch_data_dict = {
++            "task": task,
++            "nodes_feature": args[1],
++            "x": args[2],
++            "graph": args[3],
++            "e": args[4],
++            "mask": args[5],
++            "ground_truth": args[6],
++            "nodes_num_list": args[7],
++            "raw_data_list": args[8]
++        }
++        
+         if task == "ATSP":
+             return atsp_dense_decode(
+-                vars=vars, graph=graph, return_cost=return_cost, **self.decode_kwargs
++                vars=vars, return_cost=return_cost, **batch_data_dict, **self.decode_kwargs
+             )
+         elif task == "CVRP":
+             return cvrp_dense_decode(
+-                vars=vars, nodes_feature=nodes_feature, 
+-                return_cost=return_cost, **self.decode_kwargs
++                vars=vars, return_cost=return_cost, **batch_data_dict, **self.decode_kwargs
+             )
+         elif task == "TSP":
+             return tsp_dense_decode(
+-                vars=vars, nodes_feature=nodes_feature, 
+-                return_cost=return_cost, **self.decode_kwargs
++                vars=vars, return_cost=return_cost, **batch_data_dict, **self.decode_kwargs
+             )
+         else:
+             raise NotImplementedError()
+\ No newline at end of file
+diff --git a/co_expander/model/embedder/__init__.py b/co_expander/model/embedder/__init__.py
+index bade94e..f462ebf 100644
+--- a/co_expander/model/embedder/__init__.py
++++ b/co_expander/model/embedder/__init__.py
+@@ -7,6 +7,7 @@ from .mis import MISEmbedder
+ from .mvc import MVCEmbedder
+ from .tsp import TSPEmbedder
+ from .time import timestep_embedding
++from .op import OPEmbedder # <-- new import
+ 
+ 
+ EMBEDDER_DICT = {
+@@ -16,8 +17,19 @@ EMBEDDER_DICT = {
+     "MIS": MISEmbedder,
+     "MCut": MCutEmbedder,
+     "MVC": MVCEmbedder,
+-    "TSP": TSPEmbedder
++    "TSP": TSPEmbedder,
++    "OP": OPEmbedder # <-- newly registered
++
+ }
+ 
+ def get_embedder_by_task(task: str):
++    return EMBEDDER_DICT[task]
++
++
++
++def get_embedder_by_task(task: str):
++    # --- Error handling ---
++    if task not in EMBEDDER_DICT:
++        raise ValueError(f"Unknown task for embedder: {task}. Available tasks: {list(EMBEDDER_DICT.keys())}")
++    # --- End ---
+     return EMBEDDER_DICT[task]
+\ No newline at end of file
+diff --git a/co_expander/model/embedder/base.py b/co_expander/model/embedder/base.py
+index e88afc3..2c0c35a 100644
+--- a/co_expander/model/embedder/base.py
++++ b/co_expander/model/embedder/base.py
+@@ -1,6 +1,6 @@
+ from typing import Sequence
+ from torch import nn, Tensor
+-
++from typing import Sequence, Optional # <-- Add Optional
+ 
+ class COExpanderEmbedder(nn.Module):
+     def __init__(self, hidden_dim: int, sparse: bool, time_flag: bool):
+@@ -20,10 +20,16 @@ class COExpanderEmbedder(nn.Module):
+                 nn.Linear(hidden_dim, hidden_dim),
+             )
+ 
++    # def forward(
++    #     self, nodes_feature: Tensor, x: Tensor, edges_feature: Tensor, 
++    #     e: Tensor, mask: Tensor, t: Tensor
++    # ) -> Sequence[Tensor]:
++# --- MODIFICATION START ---
+     def forward(
+-        self, nodes_feature: Tensor, x: Tensor, edges_feature: Tensor, 
+-        e: Tensor, mask: Tensor, t: Tensor
+-    ) -> Sequence[Tensor]:
++        self, nodes_feature, x, edges_feature, e, mask, t, node_prefix_state,
++        max_lengths: Optional[Tensor] = None # <-- Add max_lengths here
++    ):
++    # --- MODIFICATION END ---
+         """
+         Args:
+             [sparse]
+@@ -51,21 +57,25 @@ class COExpanderEmbedder(nn.Module):
+                 t: (H) 
+         """
+         if self.sparse:
+-            return self.sparse_forward(nodes_feature, x, edges_feature, e, mask, t)
++            # Pass max_lengths down
++            return self.sparse_forward(nodes_feature, x, edges_feature, e, mask, t, node_prefix_state, max_lengths)
+         else:
+-            return self.dense_forward(nodes_feature, x, edges_feature, e, mask, t)
++            # Pass max_lengths down (dense_forward needs update if used for OP)
++            return self.dense_forward(nodes_feature, x, edges_feature, e, mask, t, node_prefix_state, max_lengths)
+         
+     def sparse_forward(
+-        self, nodes_feature: Tensor, x: Tensor, edges_feature: Tensor, 
+-        e: Tensor, mask: Tensor, t: Tensor
+-    ) -> Sequence[Tensor]:
++        self, nodes_feature, x, edges_feature, e, mask, t, node_prefix_state,
++        max_lengths: Optional[Tensor] = None # <-- Add here
++    ):
+         raise NotImplementedError(
+             "``sparse_forward`` is required to implemented in subclasses."
+         )
+-    
++
++    # Update dense_forward signature in base class for consistency
+     def dense_forward(
+-        self, nodes_feature: Tensor, x: Tensor, edges_feature: Tensor, 
+-        e: Tensor, mask: Tensor, t: Tensor
++        self, nodes_feature: Tensor, x: Tensor, edges_feature: Tensor,
++        e: Tensor, mask: Tensor, t: Tensor, node_prefix_state: Tensor,
++        max_lengths: Optional[Tensor] = None # <-- Add here
+     ) -> Sequence[Tensor]:
+         raise NotImplementedError(
+             "``dense_forward`` is required to implemented in subclasses."
+diff --git a/co_expander/model/embedder/mis.py b/co_expander/model/embedder/mis.py
+index cc7446b..81d2f09 100644
+--- a/co_expander/model/embedder/mis.py
++++ b/co_expander/model/embedder/mis.py
+@@ -5,7 +5,7 @@ from co_expander.model.embedder.time import timestep_embedding
+ from co_expander.model.embedder.utils import (
+     ScalarEmbeddingSine1D, ScalarEmbeddingSine2D, ScalarEmbeddingSine3D
+ )
+-
++import torch
+ 
+ class MISEmbedder(COExpanderEmbedder):
+     def __init__(self, hidden_dim: int, sparse: bool, time_flag: bool):
+@@ -13,6 +13,8 @@ class MISEmbedder(COExpanderEmbedder):
+         
+         if self.sparse:
+             # node embedder
++            self.initial_node_proj = nn.Linear(2, hidden_dim)
++
+             self.node_embed = nn.Sequential(
+                 ScalarEmbeddingSine1D(hidden_dim),
+                 nn.Linear(hidden_dim, hidden_dim)
+@@ -29,6 +31,8 @@ class MISEmbedder(COExpanderEmbedder):
+             
+         else:
+             # node embedder
++            self.initial_node_proj = nn.Linear(2, hidden_dim)
++
+             self.node_embed = nn.Sequential(
+                 ScalarEmbeddingSine2D(hidden_dim),
+                 nn.Linear(hidden_dim, hidden_dim)
+@@ -45,7 +49,9 @@ class MISEmbedder(COExpanderEmbedder):
+ 
+     def sparse_forward(
+         self, nodes_feature: Tensor, x: Tensor, edges_feature: Tensor, 
+-        e: Tensor, mask: Tensor, t: Tensor
++        e: Tensor, mask: Tensor, t: Tensor,
++        node_prefix_state: Tensor, max_lengths: Tensor | None = None # <-- new parameter
++
+     ) -> Sequence[Tensor]:
+         """
+         Args:
+@@ -61,9 +67,16 @@ class MISEmbedder(COExpanderEmbedder):
+             t: (H)
+         """   
+         # embedding
+-        x = self.node_embed(x) # (V, H)
+-        mask = self.mask_embed(mask.long()) # (V, H)
+-        x = x + mask # (V, H)
++        # --- Modified embedding logic ---
++        # 1. Combine the initial features
++        initial_features = torch.cat([x.unsqueeze(-1), node_prefix_state], dim=-1)
++        
++        # 2. Initial projection
++        x_emb = self.initial_node_proj(initial_features) # (V, H)
++
++        # 3. Add the mask embedding
++        mask_emb = self.mask_embed(mask.long()) # (V, H)
++        x = x_emb + mask_emb # (V, H)
+         e = self.edge_embed(edges_feature) # (E, H)
+         if t is not None:
+             t = self.time_embedder(
+@@ -73,7 +86,9 @@ class MISEmbedder(COExpanderEmbedder):
+     
+     def dense_forward(
+         self, nodes_feature: Tensor, x: Tensor, edges_feature: Tensor, 
+-        e: Tensor, mask: Tensor, t: Tensor
++        e: Tensor, mask: Tensor, t: Tensor,
++        node_prefix_state: Tensor, # <-- new parameter
++
+     ) -> Sequence[Tensor]:
+         """
+         Args:
+@@ -89,9 +104,11 @@ class MISEmbedder(COExpanderEmbedder):
+             t: (H)
+         """
+         # embedding
+-        x = self.node_embed(x) # (B, V, H)
+-        mask = self.mask_embed(mask.long()) # (B, V, H)
+-        x = x + mask  # (B, V, H)
++        # Combine features and project
++        initial_features = torch.cat([x.unsqueeze(-1), node_prefix_state], dim=-1)
++        x_emb = self.initial_node_proj(initial_features) # (B, V, H)        mask = self.mask_embed(mask.long()) # (B, V, H)
++        mask_emb = self.mask_embed(mask.long()) # (B, V, H)
++        x = x_emb + mask_emb  # (B, V, H)
+         e = self.edge_embed(edges_feature) # (B, V, V, H)
+         if t is not None:
+             t = self.time_embedder(
+diff --git a/co_expander/model/embedder/op.py b/co_expander/model/embedder/op.py
+new file mode 100644
+index 0000000..87f6fd3
+--- /dev/null
++++ b/co_expander/model/embedder/op.py
+@@ -0,0 +1,92 @@
++# co_expander_edit/model/embedder/op.py
++
++from typing import Sequence, Tuple
++import torch
++from torch import Tensor, nn
++from co_expander.model.embedder.base import COExpanderEmbedder
++from co_expander.model.embedder.time import timestep_embedding
++from co_expander.model.embedder.utils import ScalarEmbeddingSine1D
++
++class OPEmbedder(COExpanderEmbedder):
++    def __init__(self, hidden_dim: int, sparse: bool, time_flag: bool):
++        super(OPEmbedder, self).__init__(hidden_dim, sparse, time_flag)
++
++        if not self.sparse:
++            raise NotImplementedError("Dense mode not implemented for OPEmbedder")
++
++        # Node Feature Projection (Input: IsDepot, Prize, IsPrefix -> Dim 3)
++        self.node_feature_proj = nn.Linear(3, hidden_dim)
++
++        # Edge Feature Embeddings (Input: Distance -> Dim 1)
++        self.distance_embed = nn.Sequential(
++            ScalarEmbeddingSine1D(hidden_dim),
++            nn.Linear(hidden_dim, hidden_dim)
++        )
++        # Edge Variable 'e' Embedding (Input: Noisy label -> Dim 1 scalar)
++        self.label_embed = nn.Sequential(
++            ScalarEmbeddingSine1D(hidden_dim),
++            nn.Linear(hidden_dim, hidden_dim)
++        )
++        # Merge edge embeddings
++        self.edge_embed = nn.Linear(hidden_dim, hidden_dim)
++
++        # Mask embedding (applied to edges for OP)
++        self.mask_embed = nn.Embedding(2, hidden_dim)
++
++        # Max Length Embedding
++        # Keep the embedding dimension consistent with prefix cond dim (or configurable)
++        self.max_length_embed_dim = hidden_dim // 4 # Example, make configurable later
++        self.max_length_embed = nn.Sequential(
++            nn.Linear(1, self.max_length_embed_dim),
++            nn.ReLU(),
++            nn.Linear(self.max_length_embed_dim, self.max_length_embed_dim)
++        )
++
++    # sparse_forward modified to match GNNEncoder's expectations and return max_length_emb
++    def sparse_forward(
++        self, nodes_feature: Tensor, x: Tensor, edges_feature: Tensor,
++        e: Tensor, mask: Tensor, t: Tensor,
++        node_prefix_state: Tensor, # Already handled by the base class, written out explicitly
++        max_lengths: Tensor        # New
++    ) -> Tuple[Tensor | None, Tensor | None, Tensor | None, Tensor | None]:
++        """
++        Args:
++            nodes_feature: (V, 3) [IsDepot, Prize, IsPrefix]
++            x: None (node decision variable not used)
++            edges_feature: (E, 1) [Distance]
++            e: (E,) Noisy edge label (scalar)
++            mask: (E,) Edge mask (bool)
++            t: (B,) Time step for each graph in batch (or (1,) if single)
++            node_prefix_state: (V, 1) IsPrefix indicator (already included in nodes_feature)
++            max_lengths: (B,) Max length constraint for each graph
++        Return:
++            x_emb: (V, H) Embedded node features
++            e_emb: (E, H) Embedded edge features + mask + label
++            t_emb: (B, H) or (H) Embedded time
++            max_length_emb: (B, H_max_length) Embedded max length constraint
++        """
++        # Node Embedding
++        x_emb = self.node_feature_proj(nodes_feature) # (V, H)
++
++        # Edge Embedding
++        dist_emb = self.distance_embed(edges_feature.squeeze(-1)) # (E, H)
++        label_emb = self.label_embed(e) # (E, H)
++        e_merged = self.edge_embed(dist_emb + label_emb) # Combine (E, H)
++
++        # Add Edge Mask Embedding
++        mask_emb = self.mask_embed(mask.long()) # (E, H)
++        e_emb = e_merged + mask_emb # (E, H)
++
++        # Time Embedding (Handle potential batch dimension in t)
++        t_emb = None
++        if t is not None and hasattr(self, 'time_embedder'):
++            if t.ndim == 0: # If t is scalar, unsqueeze
++                 t = t.unsqueeze(0)
++            # Ensure t has shape (B,) or (1,) before embedding
++            t_processed = timestep_embedding(t.repeat(max_lengths.size(0) if t.size(0)==1 else 1), self.hidden_dim) # Ensure time dim matches batch size
++            t_emb = self.time_embedder(t_processed) # (B, H) or (1, H) -> need (B,H) for layer injection
++
++        # Max Length Embedding
++        max_length_emb = self.max_length_embed(max_lengths.unsqueeze(-1).float()) # (B, H_max_length)
++
++        return x_emb, e_emb, t_emb, max_length_emb
+\ No newline at end of file
+diff --git a/co_expander/model/encoder/gnn_encoder.py b/co_expander/model/encoder/gnn_encoder.py
+index b00e772..a95130d 100644
+--- a/co_expander/model/encoder/gnn_encoder.py
++++ b/co_expander/model/encoder/gnn_encoder.py
+@@ -3,8 +3,11 @@ from typing import Sequence, Union
+ from co_expander.model.embedder import get_embedder_by_task
+ from co_expander.model.out_layer import get_out_layer_by_task
+ from co_expander.model.encoder.gnn_layer import GNNSparseBlock, GNNDenseBlock
+-
+-
++from typing import List, Any
++import torch
++import torch.nn.utils.rnn as rnn_utils # <-- Add this line
++from .prefix_encoder import PrefixEncoder # <-- import PrefixEncoder
++from typing import Sequence, Union, List, Tuple # <-- make sure Tuple is imported
+ class GNNEncoder(nn.Module):
+     def __init__(
+         self,
+@@ -17,7 +20,11 @@ class GNNEncoder(nn.Module):
+         norm: str = "layer",
+         learn_norm: bool = True, 
+         track_norm: bool = False,
+-        mask_frozen: bool = False
++        mask_frozen: bool = False,
++        # --- New: prefix encoder parameters ---
++        prefix_cond_dim: int = 256,
++        prefix_enc_hidden_dim: int = 256,
++        max_length_cond_dim: int = 64, # Should match H_max_length in OPEmbedder
+     ):
+         super(GNNEncoder, self).__init__()
+         
+@@ -49,6 +56,67 @@ class GNNEncoder(nn.Module):
+                 nn.Linear(hidden_dim, hidden_dim),
+             ) for _ in range(len(block_layers))
+         ])
++        # # --- New: prefix encoder and projection layers ---
++        # if task in ["MIS", "MCl", "MVC"]: # only added for node-selection problems
++        #     self.prefix_encoder = PrefixEncoder(
++        #         node_feat_dim=hidden_dim,
++        #         hidden_dim=prefix_enc_hidden_dim,
++        #         output_dim=prefix_cond_dim
++        #     )
++        #     self.prefix_cond_proj = nn.Linear(prefix_cond_dim, hidden_dim)
++
++        #     self.prefix_proj_layers = nn.ModuleList([
++        #         nn.Linear(hidden_dim, hidden_dim) for _ in range(len(block_layers))
++        #     ])
++        # # --- End of addition ---
++
++
++# --- Prefix encoder (enabled for OP) ---
++        self.use_prefix_encoder = False
++        if task in ["MIS", "MCl", "MVC", "OP"] and prefix_cond_dim > 0: # OP is an edge task but also uses a prefix
++            self.use_prefix_encoder = True
++            node_feat_dim_for_prefix = hidden_dim # Use GNN hidden dim after initial embedding
++            self.prefix_encoder = PrefixEncoder(
++                node_feat_dim=node_feat_dim_for_prefix,
++                hidden_dim=prefix_enc_hidden_dim,
++                output_dim=prefix_cond_dim
++            )
++            self.prefix_cond_proj = nn.Linear(prefix_cond_dim, hidden_dim) # Project to GNN dim
++            self.prefix_proj_layers = nn.ModuleList([
++                nn.Linear(hidden_dim, hidden_dim) for _ in range(len(block_layers))
++            ])
++
++        # --- Max-length conditioning (OP only) ---
++        self.use_max_length_cond = False
++        if task == "OP" and max_length_cond_dim > 0:
++             self.use_max_length_cond = True
++             # Make sure the input dimension matches the output of OPEmbedder
++             _embedder_max_length_dim = getattr(self.embedder, 'max_length_embed_dim', max_length_cond_dim)
++             if _embedder_max_length_dim != max_length_cond_dim:
++                 print(f"Warning: GNNEncoder max_length_cond_dim ({max_length_cond_dim}) mismatch with OPEmbedder output ({_embedder_max_length_dim}). Using embedder dim.")
++             self.max_length_cond_proj = nn.Linear(_embedder_max_length_dim, hidden_dim) # Project to GNN dim
++             self.max_length_proj_layers = nn.ModuleList([
++                 nn.Linear(hidden_dim, hidden_dim) for _ in range(len(block_layers))
++             ])
++        
++# # --- New: prefix encoder and projection layers ---
++#         self.use_prefix_encoder = False # Flag to control usage
++#         if task in ["MIS", "MCl", "MVC"]: # only added for node-selection problems
++#             self.use_prefix_encoder = True
++#             # Use the embedder output dimension as the prefix_encoder input dimension
++#             # Note: assumes the embedder outputs x with shape (..., hidden_dim)
++#             node_feat_dim_for_prefix = hidden_dim
++#             self.prefix_encoder = PrefixEncoder(
++#                 node_feat_dim=node_feat_dim_for_prefix,
++#                 hidden_dim=prefix_enc_hidden_dim,
++#                 output_dim=prefix_cond_dim
++#             )
++#             self.prefix_cond_proj = nn.Linear(prefix_cond_dim, hidden_dim)
++
++#             self.prefix_proj_layers = nn.ModuleList([
++#                 nn.Linear(hidden_dim, hidden_dim) for _ in range(len(block_layers))
++#             ])
++#         # --- End of addition ---
+ 
+         # asym
+         if task in ["ATSP"]:
+@@ -90,28 +158,43 @@ class GNNEncoder(nn.Module):
+             self.embedder.mask_embed.weight.requires_grad = False  
+             
+     def forward(
+-        self, task: str, focus_on_node: bool, focus_on_edge: bool, 
+-        nodes_feature: Tensor, x: Tensor, edges_feature: Tensor, 
+-        e: Tensor, mask: Tensor, t: Tensor, edge_index: Tensor
+-    ) -> Sequence[Tensor]:
+-        if task in ["ATSP"]:
+-            return self.asym_forward(
+-                task=task, focus_on_node=focus_on_node, focus_on_edge=focus_on_edge,
+-                nodes_feature=nodes_feature, x=x, edges_feature=edges_feature,
+-                e=e, mask=mask, t=t, edge_index=edge_index
+-            )
+-        else:
+-            return self.sym_forward(
+-                task=task, focus_on_node=focus_on_node, focus_on_edge=focus_on_edge,
+-                nodes_feature=nodes_feature, x=x, edges_feature=edges_feature,
+-                e=e, mask=mask, t=t, edge_index=edge_index
+-            )
++            self, task: str, focus_on_node: bool, focus_on_edge: bool,
++            nodes_feature: Tensor | None, # Can be None
++            x: Tensor | None,             # Can be None
++            edges_feature: Tensor | None, # Can be None
++            e: Tensor | None,             # Can be None
++            mask: Tensor,
++            t: Tensor | None,             # Can be None
++            edge_index: Tensor | None,    # Can be None for dense
++            # --- New / changed parameters ---
++            node_prefix_state: Tensor | None,
++            prefix_nodes: List[Tensor],
++            nodes_num_list: list,
++            max_lengths: Tensor | None = None # New: max_lengths
++        ) -> Tuple[Tensor | None, Tensor | None]:
++            if task in ["ATSP"]:
++                return self.asym_forward(
++                    task=task, focus_on_node=focus_on_node, focus_on_edge=focus_on_edge,
++                    nodes_feature=nodes_feature, x=x, edges_feature=edges_feature,
++                    e=e, mask=mask, t=t, edge_index=edge_index
++                )
++            else:
++                return self.sym_forward(
++                    task=task, focus_on_node=focus_on_node, focus_on_edge=focus_on_edge,
++                    nodes_feature=nodes_feature, x=x, edges_feature=edges_feature,
++                    e=e, mask=mask, t=t, edge_index=edge_index,
++                    node_prefix_state=node_prefix_state,
++                    prefix_nodes=prefix_nodes,
++                    nodes_num_list=nodes_num_list,
++                    max_lengths = max_lengths
++                )
+         
+     def asym_forward(
+         self, task: str, focus_on_node: bool, focus_on_edge: bool, 
+         nodes_feature: Tensor, x: Tensor, edges_feature: Tensor, 
+         e: Tensor, mask: Tensor, t: Tensor, edge_index: Tensor
+     ) -> Sequence[Tensor]:
++        
+         # nodes number
+         nodes_num = None if x is None else x.shape[0]
+         
+@@ -136,28 +219,249 @@ class GNNEncoder(nn.Module):
+         x, e = self.out_layer(x, e)
+         # return
+         return x, e
+-    
++    # original sym_forward
++    # def sym_forward(
++    #     self, task: str, focus_on_node: bool, focus_on_edge: bool, 
++    #     nodes_feature: Tensor, x: Tensor, edges_feature: Tensor, 
++    #     e: Tensor, mask: Tensor, t: Tensor, edge_index: Tensor,
++    #     # --- New parameters ---
++    #     node_prefix_state: Tensor,
++    #     prefix_nodes: List[Tensor],
++    #     nodes_num_list: list
++    # ) -> Sequence[Tensor]:
++    #     # embedder
++    #     x, e, t = self.embedder(nodes_feature, x, edges_feature, e, mask, t, node_prefix_state)
++
++    #     # --- New: compute the prefix condition vector ---
++    #     prefix_cond_emb = None
++    #     if task in ["MIS", "MCl", "MVC"] and hasattr(self, 'prefix_encoder'):
++    #         batch_size = len(nodes_num_list)
++    #         prefix_cond_vector = torch.zeros(batch_size, self.prefix_encoder.linear.out_features, device=x.device, dtype=x.dtype)
++            
++    #         prefix_lengths = torch.tensor([len(p) for p in prefix_nodes], device=x.device)
++    #         has_prefix_mask = prefix_lengths > 0
++
++    #         if has_prefix_mask.any():
++    #             features_to_encode = []
++    #             lengths_to_encode = []
++    #             node_counter = 0
++    #             for i in range(batch_size):
++    #                 num_nodes_in_graph = nodes_num_list[i]
++    #                 if prefix_lengths[i] > 0:
++    #                     prefix_indices_local = prefix_nodes[i]
++    #                     prefix_features = x[node_counter : node_counter + num_nodes_in_graph][prefix_indices_local]
++    #                     features_to_encode.append(prefix_features)
++    #                     lengths_to_encode.append(prefix_lengths[i].item())
++    #                 node_counter += num_nodes_in_graph
++
++    #             if features_to_encode:
++    #                 padded_features = rnn_utils.pad_sequence(features_to_encode, batch_first=True)
++    #                 computed_cond = self.prefix_encoder(padded_features, torch.tensor(lengths_to_encode, device=x.device))
++    #                 prefix_cond_vector[has_prefix_mask] = computed_cond
++            
++    #         prefix_cond_emb = self.prefix_cond_proj(prefix_cond_vector)
++    #     # --- End of addition ---
++
++    #     batch_vector = torch.repeat_interleave(torch.arange(len(nodes_num_list), device=x.device), torch.tensor(nodes_num_list, device=x.device))
++
++    #     # gnn blocks
++    #     for i, (gnn_block, node_time_layer, edge_time_layer) in enumerate(zip(
++    #         self.blocks, self.node_time_layers, self.edge_time_layers
++    #     )):
++    #         gnn_block: Union[GNNDenseBlock, GNNSparseBlock]
++            
++    #         # --- Changed: inject the condition ---
++    #         if focus_on_node and t is not None:
++    #             x = x + node_time_layer(t)
++    #             if prefix_cond_emb is not None:
++    #                 prefix_cond_per_node = self.prefix_proj_layers[i](prefix_cond_emb)[batch_vector]
++    #                 x = x + prefix_cond_per_node
++    #         # --- Change end ---
++
++    #         x, e = gnn_block.forward(x=x, e=e, edge_index=edge_index)
++
++    #         if focus_on_edge and t is not None:
++    #             e = e + edge_time_layer(t)
++
++    #     # out layer
++    #     x, e = self.out_layer(x, e)
++    #     return x, e
++
++# --------------- Modified sym_forward ---------------
++ # --- asym_forward unchanged (OP is symmetric) ---
++
++    # --- sym_forward modified to handle the OP conditions ---
+     def sym_forward(
+-        self, task: str, focus_on_node: bool, focus_on_edge: bool, 
+-        nodes_feature: Tensor, x: Tensor, edges_feature: Tensor, 
+-        e: Tensor, mask: Tensor, t: Tensor, edge_index: Tensor
+-    ) -> Sequence[Tensor]:
+-        # embedder
+-        x, e, t = self.embedder(nodes_feature, x, edges_feature, e, mask, t)
++        self, task: str, focus_on_node: bool, focus_on_edge: bool,
++        nodes_feature: Tensor | None, x: Tensor | None, edges_feature: Tensor | None,
++        e: Tensor | None, mask: Tensor, t: Tensor | None, edge_index: Tensor | None,
++        node_prefix_state: Tensor | None, prefix_nodes: List[Tensor],
++        nodes_num_list: list, max_lengths: Tensor | None # <-- receive max_lengths
++    ) -> Tuple[Tensor | None, Tensor | None]:
+ 
+-        # gnn blocks
+-        for gnn_block, node_time_layer, edge_time_layer in zip(
+-            self.blocks, self.node_time_layers, self.edge_time_layers
+-        ):
++        batch_size = len(nodes_num_list)
++
++        # 1. Embedder (may now return max_length_emb)
++        embedder_output = self.embedder(
++            nodes_feature, x, edges_feature, e, mask, t,
++            node_prefix_state=node_prefix_state, # Pass to the embedder
++            max_lengths=max_lengths             # Pass to the embedder
++        )
++
++        # Unpack the embedder output - assume the OP embedder returns (x_emb, e_emb, t_emb, max_length_emb)
++        if task == "OP":
++            x_emb, e_emb, t_emb, max_length_emb = embedder_output
++            x, e = x_emb, e_emb # Update the GNN inputs
++        else:
++            # Embedders of other tasks may return only 3 values
++            x_emb, e_emb, t_emb = embedder_output[:3]
++            x, e = x_emb, e_emb
++            max_length_emb = None # OP-specific
++
++        # --- Prefix condition vector (keeps the DDP-safe logic) ---
++        prefix_cond_emb = None
++        if self.use_prefix_encoder and x is not None: # Node embeddings x are needed for this computation
++            prefix_lengths = torch.tensor([len(p) for p in prefix_nodes], device=x.device)
++            has_prefix_mask = prefix_lengths > 0
++            features_to_encode = []
++            lengths_to_encode = []
++            original_indices_with_prefix = []
++            node_counter = 0
++            for i in range(batch_size):
++                num_nodes_in_graph = nodes_num_list[i]
++                if prefix_lengths[i] > 0:
++                    prefix_indices_local = prefix_nodes[i]
++                    if node_counter + num_nodes_in_graph <= x.shape[0]:
++                         prefix_features = x[node_counter : node_counter + num_nodes_in_graph][prefix_indices_local]
++                         features_to_encode.append(prefix_features)
++                         lengths_to_encode.append(prefix_lengths[i].item())
++                         original_indices_with_prefix.append(i)
++                    # else: skip or handle error
++                node_counter += num_nodes_in_graph
++
++            prefix_cond_vector = torch.zeros(batch_size, self.prefix_encoder.linear.out_features, device=x.device, dtype=x.dtype)
++            if not features_to_encode: # DDP Safe Dummy Pass
++                 dummy_feat = torch.zeros(1, 1, self.prefix_encoder.lstm.input_size, device=x.device, dtype=x.dtype)
++                 dummy_len = torch.ones(1, device=x.device, dtype=torch.long)
++                 _ = self.prefix_encoder(dummy_feat, dummy_len)
++            else:
++                 padded_features = rnn_utils.pad_sequence(features_to_encode, batch_first=True)
++                 computed_cond = self.prefix_encoder(padded_features, torch.tensor(lengths_to_encode, device=x.device))
++                 original_indices_tensor = torch.tensor(original_indices_with_prefix, device=x.device)
++                 # Use scatter_add_ or index_put_ for safer assignment in distributed settings if needed
++                 prefix_cond_vector.scatter_(0, original_indices_tensor.unsqueeze(1).expand_as(computed_cond), computed_cond)
++
++            prefix_cond_emb = self.prefix_cond_proj(prefix_cond_vector) # (batch_size, hidden_dim)
++
++        # --- Max-length condition projection (if present) ---
++        projected_max_length_emb = None
++        if self.use_max_length_cond and max_length_emb is not None:
++             projected_max_length_emb = self.max_length_cond_proj(max_length_emb) # (batch_size, hidden_dim)
++
++        # --- batch_vector maps batch-level conditions to node/edge level ---
++        # Node-level batch vector (for injecting node conditions)
++        node_batch_vector = torch.repeat_interleave(torch.arange(batch_size, device=x.device if x is not None else e.device),
++                                                    torch.tensor(nodes_num_list, device=x.device if x is not None else e.device))
++
++        # Edge-level batch vector (for injecting edge conditions - requires edge_index)
++        edge_batch_vector = None
++        if edge_index is not None:
++             # Map edge index to batch index using node_batch_vector
++             # Assuming edge_index[0] contains the source node index
++             edge_batch_vector = node_batch_vector[edge_index[0]]
++
++
++        # --- GNN Blocks Loop ---
++        num_blocks = len(self.blocks)
++        for i, gnn_block in enumerate(self.blocks):
+             gnn_block: Union[GNNDenseBlock, GNNSparseBlock]
+-            x, e = gnn_block.forward(x=x, e=e, edge_index=edge_index)
+-            if focus_on_node and t is not None:
+-                x = x + node_time_layer(t)
+-            if focus_on_edge and t is not None:
+-                e = e + edge_time_layer(t)
+ 
+-        # out layer
+-        x, e = self.out_layer(x, e)
++            # Store inputs for residual connection
++            x_res, e_res = x, e
+ 
+-        # return
+-        return x, e
+\ No newline at end of file
++            # --- Condition injection (time, prefix, max length) ---
++            # Time embedding (injected into nodes or edges)
++            if t_emb is not None:
++                # Ensure t_emb has batch dim: (B, H)
++                if t_emb.size(0) == 1 and batch_size > 1:
++                    t_emb = t_emb.repeat(batch_size, 1)
++
++                if focus_on_node and x is not None and self.node_time_layers:
++                     time_cond_for_nodes = self.node_time_layers[i](t_emb) # (B, H)
++                     # Map to nodes: (Total_V, H)
++                     time_cond_per_node = time_cond_for_nodes[node_batch_vector]
++                     x = x + time_cond_per_node
++                if focus_on_edge and e is not None and self.edge_time_layers:
++                    time_cond_for_edges = self.edge_time_layers[i](t_emb) # (B, H)
++                    if edge_batch_vector is not None:
++                         # Map to edges: (Total_E, H)
++                         time_cond_per_edge = time_cond_for_edges[edge_batch_vector]
++                         e = e + time_cond_per_edge
++                    elif not self.sparse: # Dense mode - needs broadcasting
++                        e = e + time_cond_for_edges[:, None, None, :]
++
++
++            # Prefix condition embedding (injected into nodes or edges - OP is an edge task but may also inject into nodes)
++            if self.use_prefix_encoder and prefix_cond_emb is not None:
++                 prefix_cond_projected = self.prefix_proj_layers[i](prefix_cond_emb) # (B, H)
++                 # Decide whether to inject into nodes or edges (OP usually injects into edges, but here it is injected into nodes for consistency)
++                 if x is not None: # Inject into nodes
++                      prefix_cond_per_node = prefix_cond_projected[node_batch_vector] # (Total_V, H)
++                      x = x + prefix_cond_per_node
++                 # if e is not None and edge_batch_vector is not None: # Alternative: Inject into edges
++                 #      prefix_cond_per_edge = prefix_cond_projected[edge_batch_vector] # (Total_E, H)
++                 #      e = e + prefix_cond_per_edge
++
++
++            # Max-length condition embedding (injected into nodes or edges)
++            if self.use_max_length_cond and projected_max_length_emb is not None:
++                 max_length_cond_projected = self.max_length_proj_layers[i](projected_max_length_emb) # (B, H)
++                 # Decide whether to inject into nodes or edges (depends on the GNN architecture)
++                 if focus_on_edge and e is not None: # Inject into edges for OP
++                     if edge_batch_vector is not None:
++                         max_length_cond_per_edge = max_length_cond_projected[edge_batch_vector] # (Total_E, H)
++                         e = e + max_length_cond_per_edge
++                     elif not self.sparse: # Dense mode
++                        e = e + max_length_cond_projected[:, None, None, :]
++                 # elif x is not None: # Alternative: Inject into nodes
++                 #      max_length_cond_per_node = max_length_cond_projected[node_batch_vector] # (Total_V, H)
++                 #      x = x + max_length_cond_per_node
++
++            # --- GNN Block Forward Pass ---
++            # Pass the modified x, e
++            if self.sparse:
++                x_block_out, e_block_out = gnn_block(x=x, e=e, edge_index=edge_index)
++            else:
++                x_block_out, e_block_out = gnn_block(x=x, e=e, edge_index=None) # Pass None for dense
++
++            # --- Residual Connection ---
++            # GNNBlock has no internal residual connection, so it is added here
++            if x is not None and x_res is not None:
++                 x = x_res + x_block_out
++            else:
++                 x = x_block_out # Should not happen if x_res existed
++
++            if e is not None and e_res is not None:
++                 # Apply per-layer output transformation *before* residual for edges
++                 # (This matches the original GNNLayer logic where out_layer is applied before adding back e_in)
++                 if i < num_blocks and hasattr(self, 'per_layer_out') and self.per_layer_out: # Check if exists
++                     e_transformed = self.per_layer_out[i](e_block_out)
++                     e = e_res + e_transformed
++                 else: # No per_layer_out or last layer
++                     e = e_res + e_block_out
++            else:
++                 e = e_block_out
++
++
++        # --- Final Output Layer ---
++        # Note: out_layer may expect only x or e
++        x_final, e_final = self.out_layer(x, e)
++
++        return x_final, e_final
++
++# --- Helper function ---
++def zero_module(module: nn.Module):
++    """Zero out the parameters of a module and return it."""
++    for p in module.parameters():
++        p.detach().zero_()
++    return module
+\ No newline at end of file
+diff --git a/co_expander/model/encoder/prefix_encoder.py b/co_expander/model/encoder/prefix_encoder.py
+new file mode 100644
+index 0000000..20ed9de
+--- /dev/null
++++ b/co_expander/model/encoder/prefix_encoder.py
+@@ -0,0 +1,40 @@
++# co_expander/model/encoder/prefix_encoder.py
++
++import torch
++import torch.nn as nn
++import torch.nn.utils.rnn as rnn_utils
++
++class PrefixEncoder(nn.Module):
++    """
++    Encodes a variable-length sequence of prefix node features using an LSTM
++    to produce a single conditioning vector.
++    """
++    def __init__(self, node_feat_dim, hidden_dim, output_dim):
++        super().__init__()
++        self.lstm = nn.LSTM(
++            input_size=node_feat_dim, 
++            hidden_size=hidden_dim, 
++            batch_first=True
++        )
++        self.linear = nn.Linear(hidden_dim, output_dim)
++
++    def forward(self, prefix_node_features, prefix_lengths):
++        """
++        Args:
++            prefix_node_features (Tensor): Padded tensor of prefix features (B, max_len, node_feat_dim).
++            prefix_lengths (Tensor): Tensor of original sequence lengths (B,).
++        """
++        # Pack padded sequence to handle variable lengths
++        packed_features = rnn_utils.pack_padded_sequence(
++            prefix_node_features,
++            prefix_lengths.cpu(), # pack_padded_sequence requires lengths on CPU
++            batch_first=True,
++            enforce_sorted=False
++        )
++        
++        # LSTM processing
++        self.lstm.flatten_parameters()
++        _, (hn, _) = self.lstm(packed_features)
++        
++        # Get the final hidden state and project it
++        return self.linear(hn.squeeze(0))
+\ No newline at end of file
+diff --git a/co_expander/model/model_base.py b/co_expander/model/model_base.py
+index 1aab053..9712d1b 100644
+--- a/co_expander/model/model_base.py
++++ b/co_expander/model/model_base.py
+@@ -1,3 +1,5 @@
++# co_expander/model/model_base.py
++
+ import torch
+ from typing import Any
+ from torch import Tensor
+@@ -40,51 +42,25 @@ class COExpanderModel(BaseModel):
+         self.beam_size = beam_size
+         self.energy_finetune = energy_finetune
+         
+-        # load pretrained weights if needed
+         if weight_path is not None:
+             state_dict = torch.load(weight_path, map_location="cpu")
+             self.load_state_dict(state_dict, strict=True)
+         self.to(self.env.device)
+ 
+     def shared_step(self, batch: Any, batch_idx: int, phase: str):
+-        # set mode
+         self.env.mode = phase
+         
+-        # get real data
+-        """
+-        task: ATSP or CVRP or MCl or MCut or MIS or MVC or TSP
+-        if sparse:
+-            [0] task
+-            [1] nodes_feature: (V, C) or (V,) 
+-            [2] x: (V,), Decision variable for Nodes
+-            [3] edges_feature: (E, D) or (E,) 
+-            [4] e: (E,), Decision variable for Edges
+-            [5] edge_index: (2, E)
+-            [6] graph_list: for mask
+-            [7] mask: (E,) or (V,)
+-            [8] ground_truth: (E,) or (V,)
+-            [9] nodes_num_list
+-            [10] edges_num_list
+-            [11] raw_data_list
+-        else:
+-            [0] task
+-            [1] nodes_feature: (B, V, C) or (B, V)
+-            [2] x: (B, V), Decision variable for Nodes
+-            [3] graph: (B, V, V)
+-            [4] e: (B, V, V), Decision variable for Edges
+-            [5] mask: (B, V, V) or (B, V)
+-            [6] ground_truth: (B, V, V) or (B, V)
+-            [7] nodes_num_list
+-            [8] raw_data_list
+-        """
+         if phase == "train":
+-            # get real train batch data
+             batch_size = len(batch)
+             batch_data = self.env.generate_train_data(batch_size)
++            if batch_data is None:
++                            print(f"Warning: generate_train_data returned None for train batch_idx {batch_idx}. Skipping step.")
++                            # Return something appropriate, like None or a zero loss tensor if optimizer requires it
++                            return torch.tensor(0.0, device=self.device, requires_grad=True) # Example: return zero loss
++
+             task = batch_data[0]
+             
+-            # deal with different task
+-            if task in ["TSP", "ATSP", "CVRP"]:
++            if task in ["TSP", "ATSP", "CVRP", "OP"]:# <-- add "OP" here:
+                 if self.env.sparse:
+                     loss = self.train_edge_sparse_process(*batch_data)
+                 else:
+@@ -98,12 +74,12 @@ class COExpanderModel(BaseModel):
+                 raise NotImplementedError()
+             
+         elif phase == "val":
+-            # get val data
+             batch_data = self.env.generate_val_data(batch_idx)
++            if batch_data is None:
++                            print(f"Info: Received None batch for validation index {batch_idx}, skipping.")
++                            return None # Pytorch Lightning handles None output from validation_step
+             task = batch_data[0]
+-            
+-            # deal with different task
+-            if task in ["TSP", "ATSP", "CVRP"]:
++            if task in ["TSP", "ATSP", "CVRP", "OP"]: # <-- add "OP" here
+                 if self.env.sparse:
+                     loss, vars = self.inference_edge_sparse_process(*batch_data)
+                 else:
+@@ -111,13 +87,13 @@ class COExpanderModel(BaseModel):
+                     
+             elif task in ["MIS", "MCut", "MCl", "MVC"]:
+                 if self.env.sparse:
++                    # The *batch_data unpacking now works because the method signature is correct
+                     loss, vars = self.inference_node_sparse_process(*batch_data)
+                 else:
+                     loss, vars = self.inference_node_dense_process(*batch_data)
+             else:
+                 raise NotImplementedError()
+             
+-            # decoding
+             if self.env.sparse:
+                 costs_avg = self.decoder.sparse_decode(vars, *batch_data, return_cost=True)
+             else:
+@@ -125,7 +101,6 @@ class COExpanderModel(BaseModel):
+         else:
+             raise NotImplementedError()
+      
+-        # log
+         metrics = {f"{phase}/loss": loss}
+         if phase == "val":
+             metrics.update({"val/costs_avg": costs_avg})
+@@ -133,73 +108,59 @@ class COExpanderModel(BaseModel):
+             formatted_v = f"{v:.8f}"
+             self.log(k, float(formatted_v), prog_bar=True, on_epoch=True, sync_dist=True)
+         
+-        # return
+         return loss if phase == "train" else metrics   
+         
+     def train_edge_sparse_process(
+         self, task: str, nodes_feature: Tensor, x: Tensor, edges_feature: Tensor, e: Tensor, 
+         edge_index: Tensor, graph_list: List[Tensor], mask: Tensor, ground_truth: Tensor, 
+-        nodes_num_list: list, edges_num_list: list, raw_data_list: list
++        nodes_num_list: list, edges_num_list: list, raw_data_list: list,
++        prefix_nodes: List[Tensor], node_prefix_state: Tensor # Add new args here too
+     ) -> Tensor:
+-        raise NotImplementedError(
+-            "``train_edge_sparse_process`` is required to implemented in subclasses."
+-        )
++        raise NotImplementedError()
+    
+     def train_edge_dense_process(
+         self, task: str, nodes_feature: Tensor, x: Tensor, graph: Tensor, e: Tensor, 
+         mask: Tensor, ground_truth: Tensor, nodes_num_list: list, raw_data_list: list
++        # Dense mode not implemented for prefix yet, so signature is unchanged
+     ) -> Tensor:
+-        raise NotImplementedError(
+-            "``train_edge_dense_process`` is required to implemented in subclasses."
+-        )
++        raise NotImplementedError()
+     
+     def train_node_sparse_process(
+         self, task: str, nodes_feature: Tensor, x: Tensor, edges_feature: Tensor, e: Tensor, 
+         edge_index: Tensor, graph_list: List[Tensor], mask: Tensor, ground_truth: Tensor, 
+-        nodes_num_list: list, edges_num_list: list, raw_data_list: list
++        nodes_num_list: list, edges_num_list: list, raw_data_list: list,
++        prefix_nodes: List[Tensor], node_prefix_state: Tensor # Add new args here
+     ) -> Tensor:
+-        raise NotImplementedError(
+-            "``train_node_sparse_process`` is required to implemented in subclasses."
+-        )
++        raise NotImplementedError()
+ 
+     def train_node_dense_process(
+         self, task: str, nodes_feature: Tensor, x: Tensor, graph: Tensor, e: Tensor, 
+         mask: Tensor, ground_truth: Tensor, nodes_num_list: list, raw_data_list: list
+     ) -> Tensor:
+-        raise NotImplementedError(
+-            "``inference_edge_sparse_process`` is required to implemented in subclasses."
+-        )
++        raise NotImplementedError()
+ 
+     def inference_edge_sparse_process(
+         self, task: str, nodes_feature: Tensor, x: Tensor, edges_feature: Tensor, e: Tensor, 
+         edge_index: Tensor, graph_list: List[Tensor], mask: Tensor, ground_truth: Tensor, 
+-        nodes_num_list: list, edges_num_list: list, raw_data_list: list
++        nodes_num_list: list, edges_num_list: list, raw_data_list: list,
++        prefix_nodes: List[Tensor], node_prefix_state: Tensor # Add new args here
+     ) -> Union[Tensor, Tuple[Tensor, Tensor]]:
+-        raise NotImplementedError(
+-            "``inference_edge_sparse_process`` is required to implemented in subclasses."
+-        )
++        raise NotImplementedError()
+ 
+     def inference_edge_dense_process(
+         self, task: str, nodes_feature: Tensor, x: Tensor, graph: Tensor, e: Tensor, 
+         mask: Tensor, ground_truth: Tensor, nodes_num_list: list, raw_data_list: list
+     ) -> Union[Tensor, Tuple[Tensor, Tensor]]:
+-        raise NotImplementedError(
+-            "``inference_edge_dense_process`` is required to implemented in subclasses."
+-        )
++        raise NotImplementedError()
+ 
++    # --- THIS IS THE KEY FIX ---
+     def inference_node_sparse_process(
+         self, task: str, nodes_feature: Tensor, x: Tensor, edges_feature: Tensor, e: Tensor, 
+         edge_index: Tensor, graph_list: List[Tensor], mask: Tensor, ground_truth: Tensor, 
+-        nodes_num_list: list, edges_num_list: list, raw_data_list: list
++        nodes_num_list: list, edges_num_list: list, raw_data_list: list,
++        prefix_nodes: List[Tensor], node_prefix_state: Tensor # Add new args here
+     ) -> Union[Tensor, Tuple[Tensor, Tensor]]:
+         raise NotImplementedError(
+             "``inference_node_sparse_process`` is required to implemented in subclasses."
+         )
+-        
+-    def inference_node_dense_process(
+-        self, task: str, nodes_feature: Tensor, x: Tensor, graph: Tensor, e: Tensor, 
+-        mask: Tensor, ground_truth: Tensor, nodes_num_list: list, raw_data_list: list
+-    ) -> Union[Tensor, Tuple[Tensor, Tensor]]:
+-        raise NotImplementedError(
+-            "``inference_node_dense_process`` is required to implemented in subclasses."
+-        )
+\ No newline at end of file
++        
+\ No newline at end of file
+diff --git a/co_expander/model/out_layer/__init__.py b/co_expander/model/out_layer/__init__.py
+index 9d5553b..8fa377e 100644
+--- a/co_expander/model/out_layer/__init__.py
++++ b/co_expander/model/out_layer/__init__.py
+@@ -10,8 +10,16 @@ OUTLAYER_DICT = {
+     "MIS": NodeOutLayer,
+     "MCut": NodeOutLayer,
+     "MVC": NodeOutLayer,
+-    "TSP": EdgeOutLayer
++    "TSP": EdgeOutLayer,
++    "OP": EdgeOutLayer  # <-- ADD THIS LINE
+ }
+ 
++# def get_out_layer_by_task(task: str):
++#     return OUTLAYER_DICT[task]
++
+ def get_out_layer_by_task(task: str):
++    # --- Optional: Add error handling ---
++    if task not in OUTLAYER_DICT:
++        raise ValueError(f"Unknown task for out_layer: {task}. Available tasks: {list(OUTLAYER_DICT.keys())}")
++    # --- End Optional ---
+     return OUTLAYER_DICT[task]
+\ No newline at end of file
+diff --git a/co_expander/model/out_layer/edge.py b/co_expander/model/out_layer/edge.py
+index d6bb7ab..a130875 100644
+--- a/co_expander/model/out_layer/edge.py
++++ b/co_expander/model/out_layer/edge.py
+@@ -2,14 +2,58 @@ from typing import Sequence
+ from torch import Tensor, nn
+ from co_expander.model.out_layer.base import U2DCOOutLayer
+ from co_expander.model.out_layer.utils import GroupNorm32
++from torch.nn import Linear
++
++# class EdgeOutLayer(U2DCOOutLayer):
++#     def __init__(self, hidden_dim: int, out_channels: int, sparse: bool):
++#         super(EdgeOutLayer, self).__init__(hidden_dim, out_channels, sparse)
++#         self.e_norm = GroupNorm32(32, hidden_dim)
++#         self.e_out = nn.Conv2d(hidden_dim, out_channels, kernel_size=1, bias=True)
++        
++#     def sparse_forward(self, x: Tensor, e: Tensor) -> Sequence[Tensor]:
++#         """
++#         Args:
++#             x: (V, H); e: (E, H);
++#         Return:
++#             x: Any(not used); e: (E, out_channels);
++#         """
++#         nodes_num = x.shape[0]
++#         hidden_dim = e.shape[1]
++#         edges_num = e.shape[0]
++#         e = e.reshape(1, nodes_num, -1, hidden_dim).permute((0, 3, 1, 2))
++#         e: Tensor = self.e_out(self.e_norm(e))
++#         e = e.reshape(-1, edges_num).permute((1, 0))
++#         return x, e
++
++#     def dense_forward(self, x: Tensor, e: Tensor) -> Sequence[Tensor]:
++#         """
++#         Args:
++#             x: (B, V, H); e: (B, V, V, H);
++#         Return:
++#             x: (B, out_channels, V); e: Any(not used);
++#         """
++#         e = self.e_out(self.e_norm(e.permute((0, 3, 1, 2)))) # (B, 2, V, V)
++#         return x, e
+ 
+ 
+ class EdgeOutLayer(U2DCOOutLayer):
+     def __init__(self, hidden_dim: int, out_channels: int, sparse: bool):
+         super(EdgeOutLayer, self).__init__(hidden_dim, out_channels, sparse)
+-        self.e_norm = GroupNorm32(32, hidden_dim)
+-        self.e_out = nn.Conv2d(hidden_dim, out_channels, kernel_size=1, bias=True)
+-        
++        # --- MODIFICATION START ---
++        # Use GroupNorm suitable for (N, C) layout if norm is applied before Linear
++        # Or apply norm after Linear if needed. LayerNorm might be simpler here.
++        # Let's try LayerNorm for simplicity on (E, H) tensor.
++        self.e_norm = nn.LayerNorm(hidden_dim) # Use LayerNorm for (E, H) features
++
++        if self.sparse:
++            # Use Linear instead of Conv2d for sparse edge features (E, H) -> (E, out_channels)
++            self.e_out = Linear(hidden_dim, out_channels, bias=True)
++        else:
++            # Keep Conv2d for dense (B, H, V, V) -> (B, out_channels, V, V)
++            self.e_norm = GroupNorm32(32, hidden_dim) # Keep GroupNorm for dense
++            self.e_out = nn.Conv2d(hidden_dim, out_channels, kernel_size=1, bias=True)
++        # --- MODIFICATION END ---
++
+     def sparse_forward(self, x: Tensor, e: Tensor) -> Sequence[Tensor]:
+         """
+         Args:
+@@ -17,20 +61,21 @@ class EdgeOutLayer(U2DCOOutLayer):
+         Return:
+             x: Any(not used); e: (E, out_channels);
+         """
+-        nodes_num = x.shape[0]
+-        hidden_dim = e.shape[1]
+-        edges_num = e.shape[0]
+-        e = e.reshape(1, nodes_num, -1, hidden_dim).permute((0, 3, 1, 2))
+-        e: Tensor = self.e_out(self.e_norm(e))
+-        e = e.reshape(-1, edges_num).permute((1, 0))
+-        return x, e
++        # --- MODIFICATION START ---
++        # Apply normalization and linear layer directly to edge features
++        e_normed = self.e_norm(e) # Apply LayerNorm: (E, H) -> (E, H)
++        e_out = self.e_out(e_normed) # Apply Linear: (E, H) -> (E, out_channels)
++        return x, e_out # Return original x and transformed e
++        # --- MODIFICATION END ---
+ 
+     def dense_forward(self, x: Tensor, e: Tensor) -> Sequence[Tensor]:
+         """
+         Args:
+             x: (B, V, H); e: (B, V, V, H);
+         Return:
+-            x: (B, out_channels, V); e: Any(not used);
++            x: Any(not used); e: (B, out_channels, V, V); # Corrected dense return description
+         """
+-        e = self.e_out(self.e_norm(e.permute((0, 3, 1, 2)))) # (B, 2, V, V)
++        # Dense forward remains unchanged, applies Conv2d correctly
++        # Input e needs to be (B, H, V, V) for Conv2d
++        e = self.e_out(self.e_norm(e.permute((0, 3, 1, 2)))) # (B, out_channels, V, V)
+         return x, e
+\ No newline at end of file

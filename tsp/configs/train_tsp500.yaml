@@ -1,0 +1,65 @@
+data:
+  train_path: "./data/tsp_solutions_train130000_n500_s1997_solver_concorde.npz" # training set
+  valid_path: "./data/tsp_solutions_valid15000_n500_s7991_solver_concorde.npz" # validation set
+  test_path: "./data/tsp_solutions_test10000_n500_s7991_solver_concorde.npz"
+  #prefix_k: [10, 20, 30, 40, 50]
+  # Add the new sampling strategy parameter
+  prefix_sampling_strategy: 'continuous_from_start'
+
+model:
+  num_nodes: 500
+  node_coord_dim: 2 # Usually 2 for (x,y) coordinates
+
+  # PositionEmbeddingSine parameters (for node features)
+  pos_embed_num_feats: 64 # num_pos_feats for PositionEmbeddingSine, node_embed_dim will be 2*this
+
+  # This will be derived (2 * pos_embed_num_feats), but can be stated for clarity
+  # Ensure this matches actual_node_feature_dim in ConditionalTSPSuffixDiffusionModel init
+  node_embed_dim: 128 # Should be 2 * pos_embed_num_feats
+
+  # PrefixEncoder parameters
+  # prefix_node_embed_dim will be same as node_embed_dim
+  prefix_enc_hidden_dim: 256 # LSTM hidden dim
+  prefix_cond_dim: 256       # Output dimension of PrefixEncoder (conditioning vector)
+
+  # DifuscoGNNEncoder parameters
+  gnn_n_layers: 12             # Number of GNN layers (DIFUSCO uses 12)
+  gnn_hidden_dim: 256          # Hidden dimension of GNN layers (DIFUSCO uses 256)
+  gnn_aggregation: "sum"       # Aggregation type: "sum", "mean", "max"
+  gnn_norm: "layer"            # Normalization type: "layer", "batch", or null
+  gnn_learn_norm: true         # If norm has learnable affine parameters
+  gnn_gated: true              # Whether to use edge gating in GNN layers
+
+  # Timestep embedding dimension for GNN's internal MLP (if not using external embedding directly)
+  # The DifuscoGNNEncoder calculates actual_time_embed_dim based on gnn_hidden_dim and a ratio.
+  # time_embed_dim is used by SinusoidalTimestepEmbedding if passed directly to GNN.
+  # For the current DifuscoGNNEncoder, it takes scalar timesteps and handles embedding internally.
+  # So, this time_embed_dim parameter might be for an older setup or if you plan to pass pre-embedded timesteps.
+  # The DifuscoGNNEncoder internally uses SinusoidalTimestepEmbedding with gnn_hidden_dim.
+  time_embed_dim: 256 # Should ideally match gnn_hidden_dim if GNN's internal time embedding expects that.
+
+diffusion:
+  num_timesteps: 1000
+  schedule_type: 'cosine' # 'cosine' or 'linear' for beta schedule in AdjacencyMatrixDiffusion
+
+train:
+  batch_size: 4 # Adjust based on GPU memory with the new GNN
+  num_epochs: 300
+  learning_rate: 0.0002 # DIFUSCO starts with 2e-4 and cosine decay
+  log_interval: 300
+  save_interval: 5
+  num_workers: 8
+  ckpt_dir: "./runs/prefix_difusco_tsp500" # output directory for training checkpoints
+  early_stopping_patience: 100
+  early_stopping_min_delta: 0.00005
+
+  # --- Finetuning parameters ---
+
+eval: # Add evaluation specific parameters
+  batch_size: 10 # Batch size for evaluation script
+  num_samples_to_eval: 128
+  num_samples_to_visualize: 5
+  num_inference_steps: 50 # Number of steps for p_sample_loop (DIFUSCO uses 10-50 for good results)
+  inference_schedule_type: 'cosine' # 'cosine' or 'linear' for selecting timesteps during inference
+  apply_two_opt: False
+  two_opt_max_iterations: 100 # As in your eval_GPU
