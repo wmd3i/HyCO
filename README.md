@@ -1,6 +1,6 @@
 # HyCO: A Hybrid Neural Solver for Combinatorial Optimization
 
-Official implementation of **HyCO** (NeurIPS 2026).
+Official implementation of **HyCO** Algorithm in the paper (NeurIPS 2026).
 
 Yuheng Li, Di Yang, Haipeng Chen, Yanhai Xiong — College of William & Mary
 
